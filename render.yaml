@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: hatitix-webrtc-signaling
+    runtime: node
+    plan: free
+    region: virginia
+    rootDir: relay-server
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: HOST
+        value: 0.0.0.0
+      - key: RELAY_TOKEN
+        generateValue: true

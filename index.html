@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' https://flagcdn.com data: blob:; connect-src 'self' https: wss: ws: blob: data:; media-src 'self' blob: data:">
+<title>HaTitiX</title>
+<style>
+:root{--header-h:52px;--bg:#080c08;--panel:#0d1a0d;--panel2:#0a130a;--line:#1e3f1e;--accent:#2ecc71;--text:#d1ffd1;--muted:#6f9a6f;--warn:#e0b341}
+*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',Tahoma,Verdana,sans-serif}
+body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;user-select:none;display:flex;flex-direction:column}
+button,input,select{font:inherit;color:inherit}
+header{height:var(--header-h);flex:none;display:flex;align-items:center;padding:0 14px;background:#030503;border-bottom:2px solid #050705}
+.logo{height:var(--header-h);display:flex;align-items:center;margin-right:16px}
+.logo img{display:block;width:48px;height:48px;object-fit:contain;filter:drop-shadow(0 0 6px rgba(46,204,113,.28))}
+.seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:transparent;border:0;padding:9px 18px;font-weight:800;letter-spacing:1px;font-size:12px;text-transform:uppercase;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent}
+.seg button.on{background:#122612;color:#fff;border-bottom-color:var(--accent)}
+.navs{margin-left:auto;display:flex;align-items:center;gap:4px;padding:3px;border:1px solid #182018;border-radius:8px;background:#050805}
+.navb{height:34px;min-width:72px;padding:0 10px;background:transparent;border:1px solid transparent;border-radius:6px;cursor:pointer;display:grid;place-items:center;font-weight:900;font-size:10px;letter-spacing:1px;color:var(--muted)}
+.navb:hover{color:#fff;background:#122612}
+.navb.on{color:#04140a;background:var(--accent);border-color:var(--accent)}
+.navb.gear{min-width:42px;padding:0;font-size:20px;letter-spacing:0}
+.hidden{display:none!important}
+#page-perfiles{flex:1;min-height:0;display:grid;grid-template-columns:300px 1fr;gap:16px;padding:16px}
+.plist{display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+.pcard{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;cursor:pointer}
+.pcard.sel{border-color:var(--accent)}
+.av{width:42px;height:42px;flex:none;border-radius:50%;background:#0a130a;border:2px solid var(--line);display:grid;place-items:center;font-weight:900}
+.pcard b{display:block}.pcard img{width:22px;height:15px;border-radius:2px;margin-top:3px}
+.badge{margin-left:auto;font-size:11px;font-weight:800;letter-spacing:1px;color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:3px 8px}
+.peditor{overflow-y:auto;display:flex;flex-direction:column;gap:12px}
+.peditor h2{font-size:24px;font-weight:900}
+.prow{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:14px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.prow small{display:block;color:var(--muted);font-size:12px;margin-top:4px}
+.prow .field{width:220px}
+.flags{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:8px;margin-top:10px}
+.flags button{background:var(--panel);border:1px solid var(--line);border-radius:6px;height:34px;cursor:pointer;display:grid;place-items:center;font-size:11px;font-weight:800}
+.flags button.on{border-color:var(--accent);box-shadow:0 0 8px rgba(46,204,113,.4)}
+.flags img{width:28px;height:19px;border-radius:2px}
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 330px;gap:16px;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;min-height:0}
+.lobby{display:flex;flex-direction:column}
+.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 22px;margin-bottom:14px}
+h1{font-size:30px;font-weight:900;letter-spacing:1px}
+.tab{background:none;border:0;cursor:pointer;font-weight:800;letter-spacing:1px;font-size:13px;text-transform:uppercase;color:var(--muted);padding:4px 0;border-bottom:2px solid transparent}
+.tab.on{color:#fff;border-bottom-color:var(--accent)}
+.tab small{color:var(--accent);margin-left:4px}
+.total{margin-left:auto;color:var(--muted);font-size:13px}
+.filters{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.field{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;outline:0}
+.field:focus{border-color:var(--accent)}
+#q{flex:1;min-width:160px}
+label{display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer}
+input[type=checkbox]{accent-color:var(--accent)}
+.head,.row{display:grid;grid-template-columns:30px 1fr 150px 40px 56px;align-items:center;gap:8px;padding:0 10px}
+.head{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:2px;height:30px}
+.list{flex:1;overflow-y:auto;min-height:0}
+.row{height:36px;border-radius:6px;cursor:pointer;border-left:3px solid transparent}
+.row:hover{background:#0f200f}.row.sel{background:#143014;border-left-color:var(--accent)}
+.row.pw{border-left-color:var(--warn)}
+.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.jug{display:flex;align-items:center;gap:10px;justify-content:flex-end;font-weight:800;font-size:13px}
+.bar{width:44px;height:4px;background:#1a2a1a;border-radius:2px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
+.full .bar i{background:var(--warn)}.full .cnt{color:var(--warn)}
+.empty .cnt{color:var(--muted)}
+.star{background:none;border:0;cursor:pointer;color:#345;font-size:16px}.star.on{color:var(--warn)}
+.row img{width:24px;height:16px;border-radius:2px;object-fit:cover}
+.msg{padding:30px;text-align:center;color:var(--muted)}
+.bottom{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.btn{background:#122612;border:1px solid #275227;border-radius:8px;padding:10px 18px;font-weight:800;font-size:13px;cursor:pointer;transition:.2s}
+.btn:hover{background:#1a381a;border-color:#356b35;box-shadow:0 0 8px rgba(46,204,113,.3)}
+.btn.main{background:var(--accent);color:#04140a;border-color:var(--accent)}
+.side{display:flex;flex-direction:column;gap:16px}
+.side h3{font-size:11px;letter-spacing:2px;color:var(--accent);margin-bottom:10px}
+#selname{font-weight:800;font-size:16px;margin-bottom:6px;word-break:break-word}
+.muted{color:var(--muted);font-size:13px}
+.discord{background:#5865f2;border-color:#5865f2;width:100%;margin-top:12px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:grid;place-items:center;z-index:30}
+.mbox{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px;width:min(460px,92vw);display:flex;flex-direction:column;gap:12px}
+.mbox h2{font-size:26px;font-weight:900;letter-spacing:1px}
+#room{position:fixed;left:0;right:0;bottom:0;top:var(--header-h);background:var(--bg);z-index:10;display:flex;justify-content:center;align-items:center;padding:20px}
+.rcard{width:min(1000px,100%);background:var(--panel);border:1px solid var(--line);border-top:3px solid var(--accent);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:16px}
+.rhead{display:flex;justify-content:space-between;align-items:flex-start}.rhead small{color:var(--muted);letter-spacing:3px;font-size:11px;font-weight:800}
+.rhead h2{font-size:30px;font-weight:900}
+.teams{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;min-height:260px}
+.team{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.th{display:flex;justify-content:space-between;font-weight:900;letter-spacing:1px;padding:6px 8px;border-radius:6px;background:#122612}
+.team.red .th{background:#4a1d1d}.team.blue .th{background:#1d2d4a}
+.pl{display:flex;flex-direction:column;gap:6px;overflow-y:auto}
+.pr{display:flex;align-items:center;gap:8px;padding:6px 8px;background:#0f1f0f;border-radius:6px;cursor:pointer}
+.pr:hover{background:#163016}.pr img{width:20px;height:14px;border-radius:2px}
+.pr[draggable="true"]{cursor:grab}.pr.dragging{opacity:.45;outline:1px dashed var(--accent)}
+.pr .av{width:28px;height:28px;font-size:12px}.pr .player-ping{margin-left:auto;color:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}.vos{background:var(--accent);color:#04140a;font-size:10px;font-weight:900;border-radius:4px;padding:2px 6px}
+.rfoot{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.rfoot .field{padding:8px}.btn.danger{border-color:#7a2a2a;color:#ff9b9b}
+#game{position:absolute;inset:0;background:#050708;overflow:hidden}
+#cv{width:100%;height:100%;display:block}
+#hud{position:absolute;top:12px;left:12px;display:flex;align-items:stretch;gap:0;font-weight:900;font-size:20px;background:rgba(10,12,14,.88);border-radius:7px;overflow:hidden;box-shadow:0 3px 12px rgba(0,0,0,.28)}
+#hud .r,#hud .b{min-width:44px;display:grid;place-items:center;padding:7px 10px;color:#fff}
+#hud .r{background:#a82a36}#hud .b{background:#315dba}
+#hud #h-time{min-width:72px;display:grid;place-items:center;padding:7px 10px;font-variant-numeric:tabular-nums}
+#hud .cam{font-size:10px;letter-spacing:1px;color:#d1ffd1;border-left:1px solid rgba(255,255,255,.16);padding:0 10px;display:grid;place-items:center;white-space:nowrap}
+#gbtns{position:absolute;top:12px;right:12px;display:flex;gap:3px;padding:5px;background:rgba(20,25,22,.88);border:1px solid rgba(255,255,255,.12);border-radius:9px;box-shadow:0 3px 12px rgba(0,0,0,.28)}
+#gbtns .btn{width:34px;height:30px;padding:0;border:0;background:transparent;border-radius:5px;font-size:16px;display:grid;place-items:center;color:#d6e2d6}
+#gbtns .btn:hover{background:#304030;color:#fff;box-shadow:none}
+#gbtns .btn[aria-pressed="true"]{background:#244124;color:var(--accent)}
+#chat{position:fixed;z-index:22;right:16px;bottom:16px;width:min(360px,32vw);display:flex;flex-direction:column;align-items:stretch;gap:6px;transition:opacity .15s,transform .15s;pointer-events:auto}
+#room:not(.playing) #chat{right:16px;bottom:16px;width:min(310px,34vw)}
+#chat.chat-hidden{opacity:0;pointer-events:none;transform:translateY(8px)}
+#chat-log{position:relative;z-index:1;flex:0 1 auto;min-height:28px;padding:4px;font-size:var(--chat-font-size,13px);text-shadow:0 1px 2px #000;display:flex;flex-direction:column;align-items:flex-end;gap:3px;color:#fff;max-height:var(--chat-max-height,210px);overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.22);border-radius:6px}
+#chat-log:empty::before{content:'El chat de la partida aparecerá aquí';align-self:flex-start;padding:3px 6px;color:rgba(255,255,255,.72);font-size:11px}
+#chat-log .chat-message{display:block;flex:0 0 auto;max-width:100%;padding:5px 9px;border-radius:5px;background:rgba(0,0,0,.72);color:#fff;word-break:break-word;overflow-wrap:anywhere}
+#chat-suggestions{display:flex;flex-direction:column;gap:2px;max-height:180px;overflow:auto;padding:4px;background:rgba(5,8,5,.96);border:1px solid var(--line);border-radius:7px}
+#chat-suggestions:empty{display:none}
+#chat-suggestions button{border:0;border-radius:4px;padding:6px 8px;text-align:left;background:transparent;color:var(--text);cursor:pointer;font:12px ui-monospace,Consolas,monospace}
+#chat-suggestions button:hover,#chat-suggestions button[aria-selected="true"]{background:#173117;color:var(--accent)}
+#chat-in{background:rgba(8,12,8,.86);border-color:rgba(255,255,255,.25)}
+#stats{position:absolute;left:12px;bottom:12px;display:flex;flex-direction:column;gap:3px;padding:8px 11px;background:rgba(20,25,22,.88);border-radius:4px;color:#fff;box-shadow:0 3px 12px rgba(0,0,0,.22);font-variant-numeric:tabular-nums}
+#stats .stat{display:flex;align-items:baseline;justify-content:space-between;gap:16px;min-width:94px}
+#stats small{font-size:9px;letter-spacing:2px;color:#a9b8a9}#stats b{font-size:14px}
+#match-fx{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;z-index:8;opacity:0}
+#match-fx.show{animation:fx-in .9s cubic-bezier(.2,.8,.2,1) both}
+#match-fx .fx-title{font-size:clamp(34px,6vw,82px);font-weight:1000;font-style:italic;letter-spacing:1px;text-align:center;text-transform:uppercase;line-height:.92;color:#fff;text-shadow:5px 5px 0 #111,0 0 24px currentColor;transform:skew(-7deg) scale(.7)}
+#match-fx .fx-sub{display:block;margin-top:14px;font-size:12px;letter-spacing:5px;color:#fff;text-shadow:0 2px 4px #000}
+#match-fx.goal-red .fx-title{color:#ff6574}#match-fx.goal-blue .fx-title{color:#4db6ff}#match-fx.victory .fx-title{color:#ffd45c}
+#match-fx.goal-red{background:radial-gradient(circle,rgba(194,32,54,.24),transparent 48%)}
+#match-fx.goal-blue{background:radial-gradient(circle,rgba(32,106,221,.24),transparent 48%)}
+#match-fx.victory{background:radial-gradient(circle,rgba(245,188,48,.25),transparent 48%)}
+@keyframes fx-in{0%{opacity:0}12%{opacity:1}72%{opacity:1}100%{opacity:0}}
+#match-fx.show .fx-title{animation:fx-title .9s cubic-bezier(.15,.8,.2,1) both}
+@keyframes fx-title{0%{transform:skew(-7deg) scale(.7) translateY(28px)}20%{transform:skew(-7deg) scale(1.08) translateY(0)}70%{transform:skew(-7deg) scale(1)}100%{transform:skew(-7deg) scale(1.02) translateY(-10px)}}
+#cv.vision-contrast{filter:contrast(1.12) saturate(1.18) brightness(1.05)}#cv.vision-simple{filter:saturate(.72) contrast(1.08)}
+#settings{position:fixed;inset:0;background:rgba(0,0,0,.72);display:grid;place-items:center;z-index:50}
+#settings .mbox{width:min(820px,94vw);max-height:90vh;overflow:hidden;padding:0;display:flex;flex-direction:column}
+#settings .mbox>h2{padding:22px 26px 0}
+.settings-layout{display:grid;grid-template-columns:190px 1fr;min-height:0;flex:1;margin-top:14px}
+.settings-nav{display:flex;flex-direction:column;gap:2px;padding:12px 0;background:#101216;border-right:1px solid var(--line);overflow-y:auto}
+.settings-nav button{border:0;border-left:3px solid transparent;background:transparent;color:var(--muted);padding:12px 18px;text-align:left;cursor:pointer;font-size:12px;font-weight:900;letter-spacing:1.5px}
+.settings-nav button:hover{color:#fff;background:#1a1e24}.settings-nav button.on{color:#fff;background:#24272d;border-left-color:var(--accent)}
+.settings-content{padding:0 22px 18px;overflow-y:auto;min-width:0}
+.settings-content>h3{font-size:26px;margin:4px 0 6px}.settings-content>h3,.settings-content>.section-note{display:none}
+.settings-content .settings-group{display:none;border:0;background:transparent;overflow:visible}.settings-content .settings-group.active{display:block}
+.settings-content .settings-group summary{display:none}
+#settings .settings-footer{padding:0 26px 22px}
+.custom-preview{width:42px;height:42px;object-fit:contain;background:#0b100b;border:1px solid var(--line);border-radius:6px;vertical-align:middle;margin-left:8px}
+.file-input{max-width:190px;font-size:11px}.file-clear{padding:6px 10px}
+.settings-group{border:1px solid var(--line);border-radius:8px;background:var(--panel2);overflow:hidden}
+.settings-group summary{padding:10px 12px;cursor:pointer;list-style:none;font-size:11px;font-weight:900;letter-spacing:2px;color:var(--accent);background:#122612}
+.settings-group summary::-webkit-details-marker{display:none}
+.settings-group summary::before{content:'▸';display:inline-block;margin-right:8px;color:var(--muted)}
+.settings-group[open] summary::before{content:'▾'}
+.settings-group .prow{border:0;border-top:1px solid var(--line);border-radius:0;background:transparent}
+#s-fps-limit{min-width:120px}
+.setting-inline input[type=range]{width:110px;accent-color:var(--accent)}
+.sound-row label{min-width:0;flex:1;justify-content:space-between}.sound-row .field{width:min(170px,55%)}
+.sound-file-row{gap:10px;flex-wrap:wrap}.sound-file-row>div{flex:1;min-width:160px}.sound-file-row .file-input{max-width:190px}.sound-file-row .btn{padding:7px 10px;font-size:11px}.sound-files{display:flex;flex-direction:column;gap:6px}.sound-file-row small{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-message{transition:opacity .3s,font-size .3s,transform .3s}.chat-message[data-old="1"]{opacity:.82;font-size:.96em}.chat-message[data-old="2"]{opacity:.68;font-size:.92em}.chat-message[data-old="3"]{opacity:.54;font-size:.88em}.chat-message[data-old="4"]{opacity:.4;font-size:.84em}.chat-message[data-old="5"]{opacity:.3;font-size:.8em}
+#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#122612;border:1px solid var(--accent);border-radius:8px;padding:10px 18px;z-index:40;font-weight:700}
+
+.chip{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:900;letter-spacing:1px;background:#122612;color:var(--muted);vertical-align:middle}
+.chip.live{background:#0f3a1c;color:var(--accent)}.chip.pause{background:#3a2f0f;color:var(--warn)}
+.rtools{display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.rtools .btn{padding:7px 14px;font-size:12px}
+.btn:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+.btn.on{border-color:var(--accent);color:var(--accent)}
+.throw{display:flex;gap:8px;align-items:stretch}
+.throw .th{flex:1;cursor:pointer;align-items:center}
+.throw .th.mine{box-shadow:inset 0 -3px 0 var(--accent)}
+.arr{width:40px;flex:none;background:#122612;border:1px solid #275227;border-radius:6px;cursor:pointer;font-weight:900}
+.arr:hover:not(:disabled){background:#1a381a}.arr:disabled{opacity:.4;cursor:not-allowed}
+.kbd{border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:11px;color:var(--muted)}
+#room.ov #lobby{position:relative;z-index:5;box-shadow:0 0 0 100vmax rgba(0,0,0,.6)}
+.stadiums{width:100%;height:220px}
+#player-menu{position:fixed;z-index:60;min-width:200px;max-width:min(260px,calc(100vw - 16px));padding:6px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.55)}
+#player-menu .menu-heading{padding:8px 10px 7px;color:var(--muted);font-size:11px;letter-spacing:1px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid var(--line);margin-bottom:5px}
+#player-menu button{display:block;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;text-align:left;color:var(--text);cursor:pointer;font-size:13px;font-weight:700}
+#player-menu button:hover{background:#173117;color:#fff}
+#player-menu button.danger{color:#ff9b9b}
+#player-menu button.danger:hover{background:#3b1717}
+#player-menu button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.navb.shop,.navb.stats{min-width:84px}
+.navb.replays{min-width:104px}
+.feature-page{flex:1;min-height:0;overflow:auto;padding:24px;background:radial-gradient(ellipse at 50% -20%,rgba(46,204,113,.13),transparent 60%)}
+.feature-page h1{font-size:clamp(25px,4vw,38px);letter-spacing:2px;color:var(--accent);text-shadow:0 0 16px rgba(46,204,113,.22)}
+.feature-intro{color:var(--muted);margin:6px 0 20px;font-size:14px}
+.shop-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;contain:layout style}
+.shop-item,.stat-card{background:linear-gradient(145deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 8px 28px rgba(0,0,0,.18)}
+.shop-item{display:flex;min-height:185px;flex-direction:column;gap:10px;position:relative;overflow:hidden;contain:layout paint style;content-visibility:auto;contain-intrinsic-size:auto 220px}
+.shop-item::before{content:'';position:absolute;inset:0 auto 0 0;width:3px;background:var(--accent);box-shadow:0 0 16px var(--accent)}
+.shop-swatch{height:34px;width:100%;border-radius:7px;border:1px solid rgba(255,255,255,.12)}
+.shop-preview{display:block;width:100%;height:72px;flex:none;border:1px solid rgba(255,255,255,.14);border-radius:7px;background:#080c12;image-rendering:auto}
+.shop-preview.field-preview{width:100%;height:156px;object-fit:contain;background:#080c12;padding:0}
+.replay-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.replay-card{background:linear-gradient(145deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px}.replay-card h3{font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.replay-card small{color:var(--muted)}.replay-actions{display:flex;gap:7px;flex-wrap:wrap}.replay-actions .btn{padding:8px 11px;font-size:11px}.replay-import{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0 18px}
+#embedded-replay{position:fixed;inset:0;z-index:120;background:#070a07;display:flex;flex-direction:column;color:#e5f1e5}#embedded-replay.hidden{display:none}.embedded-replay-head{height:54px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:#090e09;border-bottom:1px solid #254025}.embedded-replay-head strong{font-weight:900;letter-spacing:1px}.embedded-replay-head span{color:#a9c4a9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.embedded-replay-stage{position:relative;flex:1;min-height:0;display:grid;place-items:center;padding:12px}.embedded-replay-stage canvas{width:100%;height:100%;display:block;background:#557448}.embedded-replay-message{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:12px 18px;border-radius:8px;background:rgba(4,7,4,.88);color:#d1ffd1}.embedded-replay-error{min-height:0;padding:0 16px;color:#ffaaaa;font-size:12px}.embedded-replay-controls{flex:none;display:grid;grid-template-columns:auto auto minmax(90px,1fr) auto auto;align-items:center;gap:10px;padding:12px 16px;background:#101710;border-top:1px solid #254025}.embedded-replay-controls input[type=range]{width:100%;accent-color:#2ecc71}.embedded-replay-time{color:#a9c4a9;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}.embedded-replay-controls select{min-width:78px}
+.shop-item h3{font-size:17px}.shop-item p{color:var(--muted);font-size:12px;line-height:1.5;flex:1}
+.shop-price{color:var(--accent);font-weight:900;letter-spacing:1px}
+.shop-item .btn{width:100%}
+.mission-card{min-height:195px}.mission-progress-text{font-size:12px;color:var(--muted);font-weight:800}.mission-bar{width:100%;height:9px;accent-color:var(--accent)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:18px 0}
+.stat-card small{display:block;color:var(--muted);font-weight:800;letter-spacing:2px;font-size:11px}
+.stat-card b{display:block;font-size:34px;color:var(--accent);margin-top:8px;font-variant-numeric:tabular-nums}
+.setting-inline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.setting-inline .field{width:100px}
+.key-bindings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:12px}
+.key-binding{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:8px 10px;font-size:13px}
+.key-binding button{min-width:56px}.binding-list{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:5px}.binding-slot{display:inline-flex;gap:2px}.binding-key{min-width:54px!important;padding:7px 9px}.binding-remove{min-width:24px!important;width:24px;padding:0}.binding-add{min-width:auto!important;padding:7px 9px;font-size:11px}
+.key-binding button.listening{border-color:var(--accent);color:var(--accent);box-shadow:0 0 10px rgba(46,204,113,.25)}
+#goal-fx{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
+#hud,#gbtns,#stats{z-index:5}
+#chat{z-index:25}
+#match-fx{z-index:8}
+#cv.stretched{transform:none}
+body.match-fullscreen header{display:none}
+body.match-fullscreen #room{top:0}
+body.app-fullscreen #room{background:#000}
+#hud,#chat{touch-action:none;user-select:none}
+#hud{cursor:move}#chat{cursor:move}#chat input{cursor:text;user-select:text}
+body[data-theme="blue"]{--bg:#070d12;--panel:#0b1a22;--panel2:#09131b;--line:#1c4652;--accent:#42d9df;--text:#d2fbff;--muted:#709ba4}
+body[data-theme="violet"]{--bg:#0c0812;--panel:#1a1022;--panel2:#120b19;--line:#46255a;--accent:#c46cff;--text:#f3dcff;--muted:#aa83bd}
+body[data-theme="gold"]{--bg:#100d06;--panel:#21190a;--panel2:#171105;--line:#57431a;--accent:#e6bb42;--text:#fff3d1;--muted:#b59b5b}
+body[data-theme="classic"]{--bg:#101316;--panel:#191d21;--panel2:#121619;--line:#42494e;--accent:#dce6ec;--text:#f0f4f6;--muted:#9ba8af}
+body.classic-haxball{--bg:#25292d;--panel:#30363b;--panel2:#252a2e;--line:#51595f;--accent:#d9dfe3;--text:#f3f5f6;--muted:#b4babf}
+body.classic-haxball header{background:#000;border-bottom-color:#111}
+body.classic-haxball .navs{background:#050505;border-color:#202020}
+body.classic-haxball .navb.on{background:#d9dfe3;color:#111;border-color:#d9dfe3}
+body.classic-haxball .navb:hover{background:#222;color:#fff}
+body.classic-haxball #hud{border-radius:2px;background:rgba(8,10,12,.96);box-shadow:0 1px 5px #000}
+body.classic-haxball #hud .r{background:#b52a35}body.classic-haxball #hud .b{background:#2755a7}
+body.classic-haxball #hud #h-time{font-size:18px;color:#fff}body.classic-haxball #hud .cam{display:none}
+body.classic-haxball #chat{align-items:flex-start}body.classic-haxball #chat-log{align-items:flex-start}
+body.classic-haxball #chat-log div{background:rgba(0,0,0,.68);border-radius:2px}
+body.classic-haxball #gbtns{background:rgba(10,12,14,.94);border-radius:3px}
+body.classic-haxball .card,body.classic-haxball .shop-item,body.classic-haxball .stat-card{box-shadow:none;border-radius:4px}
+.embedded-replay-controls{position:absolute;z-index:4;left:50%;bottom:18px;transform:translateX(-50%);width:min(960px,calc(100% - 32px));background:rgba(7,13,7,.82);border:1px solid rgba(169,220,169,.24);border-radius:12px;box-shadow:0 10px 34px rgba(0,0,0,.42);backdrop-filter:blur(9px)}
+.embedded-replay-controls:hover,.embedded-replay-controls:focus-within{background:rgba(7,13,7,.94)}
+.embedded-replay-stage canvas{object-fit:contain}
+@media(max-width:650px){.embedded-replay-controls{bottom:10px;width:calc(100% - 16px);grid-template-columns:auto auto minmax(55px,1fr) auto auto;gap:5px;padding:8px}.embedded-replay-controls .btn{padding:6px 8px;font-size:10px}.embedded-replay-time{font-size:10px}.embedded-replay-controls select{min-width:60px;padding:6px}}
+@media(max-width:850px){.navs{gap:1px}.navb{min-width:54px;padding:0 6px;font-size:9px}.navb.shop,.navb.stats{min-width:62px}.feature-page{padding:14px}.key-bindings{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><img src="hatitix-logo.webp" alt="HaTitix App" draggable="false"></div>
+  
+  <nav class="navs" aria-label="Navegación rápida"><button class="navb on" data-page="salas" title="Salas" aria-label="Salas">SALAS</button><button class="navb" data-page="perfiles" title="Perfiles" aria-label="Perfiles">PERFILES</button><button class="navb shop" data-page="tienda" title="Tienda" aria-label="Tienda">TIENDA</button><button class="navb stats" data-page="estadisticas" title="Estadísticas" aria-label="Estadísticas">ESTADÍSTICAS</button><button class="navb" data-page="misiones" title="Misiones" aria-label="Misiones">MISIONES</button><button class="navb replays" data-page="repeticiones" title="Tus repeticiones" aria-label="Repeticiones">REPETICIONES</button><button class="navb gear" id="b-settings" title="Ajustes de juego" aria-label="Ajustes de juego">⚙</button></nav>
+</header>
+
+<main id="page-salas">
+  <section class="card lobby">
+    <div class="top">
+      <h1 id="page-salas-title">SALAS</h1>
+      <button class="tab on" data-tab="all">Todas<small id="c-all">0</small></button>
+      <button class="tab" data-tab="favs">Favoritas<small id="c-favs">0</small></button>
+      <button class="tab" data-tab="sang">🥪 Sanguchito<small id="c-sang">0</small></button>
+      <button class="tab" data-tab="aha">AHA<small id="c-aha">0</small></button>
+      <button class="tab" data-tab="haxarg">HAXARG<small id="c-haxarg">0</small></button>
+      <button class="tab" data-tab="seen">Últimas visitadas<small id="c-seen">0</small></button>
+      <span class="total" id="total"></span>
+    </div>
+    <div class="filters">
+      <input id="q" class="field" placeholder="Buscar sala...  ( / )" autocomplete="off">
+      <label><input type="checkbox" id="f-pw" checked>Con clave</label>
+      <label><input type="checkbox" id="f-full" checked>Llenas</label>
+      <label><input type="checkbox" id="f-empty" checked>Vacías</label>
+      <select id="country" class="field"><option value="">Todos los países</option></select>
+    </div>
+    <div class="head"><span></span><span>NOMBRE</span><span style="text-align:right">JUG.</span><span>🔒</span><span>PAÍS</span></div>
+    <div class="list" id="list"></div>
+    <div class="bottom">
+      <button class="btn" id="b-refresh">↻ Actualizar</button>
+      <button class="btn" id="b-create">+ Crear sala</button>
+      <button class="btn" id="b-quit">Salir</button>
+      <input id="link" class="field" style="margin-left:auto;width:200px" placeholder="pegar link / id...">
+      <button class="btn" id="b-link">Unirse</button>
+    </div>
+  </section>
+
+  <aside class="side">
+    <div class="card">
+      <h3>SALA SELECCIONADA</h3>
+      <div id="selname" class="muted">Elegí una sala de la lista.</div>
+      <div id="selinfo" class="muted"></div>
+      <button class="btn main" id="b-join" style="margin-top:12px;width:100%;display:none">Unirse</button>
+    </div>
+    <div class="card">
+      <h3>COMUNIDAD</h3>
+      <div style="font-weight:800">HaTitiX</div>
+      <button class="btn discord" id="b-discord">UNIRSE AL DISCORD</button>
+    </div>
+  </aside>
+</main>
+<section id="page-perfiles" class="hidden">
+  <div>
+    <h1 style="margin-bottom:6px">PERFILES</h1>
+    <div class="muted" style="letter-spacing:2px;font-size:11px;margin-bottom:12px">PERFILES GUARDADOS</div>
+    <div class="plist" id="plist"></div>
+    <button class="btn" id="p-new" style="margin-top:10px;width:100%">+ Nuevo perfil</button>
+  </div>
+  <div class="card peditor">
+    <h2 id="p-title">Nuevo perfil</h2>
+    <div class="muted">Identidad para las salas de Haxball</div>
+    <div class="prow"><b>Nombre</b><input id="p-name" class="field" maxlength="25" autocomplete="off"></div>
+    <div class="prow"><div><b>Avatar</b><small>Dos caracteres normales o un emoji. Los emoji con variación se limpian.</small></div><input id="p-avatar" class="field" maxlength="4" autocomplete="off"></div>
+    <div class="prow"><div><b>Extrapolation</b><small>Sin límite fijo. Valores extremos pueden producir tirones; vacío = no cambiar.</small></div><input id="p-extra" class="field" type="number" step="1"></div>
+    <div class="prow" style="display:block"><b>Bandera</b><div class="flags" id="flags"></div></div>
+    <div class="bottom">
+      <button class="btn main" id="p-activate">Guardar y activar</button>
+      <button class="btn" id="p-save">Guardar</button>
+      <button class="btn" id="p-delete">Eliminar</button>
+      <span class="muted" id="p-msg" style="align-self:center"></span>
+    </div>
+  </div>
+</section>
+<section id="page-tienda" class="feature-page hidden">
+  <h1 id="page-tienda-title">TIENDA HATITIX</h1>
+  <p class="feature-intro" id="shop-intro">Desbloqueá estilos para personalizar la app. Los puntos se guardan en este dispositivo.</p>
+  <div class="stat-card" style="display:inline-block;margin-bottom:18px"><small id="shop-points-label">TUS PUNTOS</small><b id="shop-points">0</b></div>
+  <div class="shop-grid" id="shop-grid"></div>
+</section>
+<section id="page-estadisticas" class="feature-page hidden">
+  <h1 id="page-estadisticas-title">ESTADÍSTICAS</h1>
+  <p class="feature-intro" id="stats-intro">Tu progreso local en HaTitix. Ganás 10 puntos por cada hora completa jugando; los goles cuentan para tus misiones.</p>
+  <div class="stats-grid">
+    <div class="stat-card"><small id="stat-points-label">PUNTOS DISPONIBLES</small><b id="stat-points">0</b></div>
+    <div class="stat-card"><small>GOLES EN PARTIDAS</small><b id="stat-goals">0</b></div>
+    <div class="stat-card"><small>HORAS JUGADAS</small><b id="stat-hours">0</b></div>
+    <div class="stat-card"><small id="stat-next-hour-label">PRÓXIMOS 10 PUNTOS</small><b id="stat-next-hour">1 h</b></div>
+  </div>
+  <p class="muted">Se cuentan los goles que ocurren en las salas mientras HaTitix está abierto. Las estadísticas y compras se guardan localmente en este equipo.</p>
+</section>
+<section id="page-misiones" class="feature-page hidden">
+  <h1 id="page-misiones-title">MISIONES</h1>
+  <p class="feature-intro" id="missions-intro">Completá objetivos de goles y tiempo de juego para reclamar puntos. Cada misión se puede cobrar una sola vez.</p>
+  <div id="missions-grid" class="shop-grid"></div>
+</section>
+<section id="page-repeticiones" class="feature-page hidden">
+  <h1 id="page-repeticiones-title">REPETICIONES</h1>
+  <p class="feature-intro">Tus partidas grabadas se guardan en este equipo. Reprodúcelas dentro de HaTitiX o importa archivos .hbr2.</p>
+  <div class="replay-import"><label class="btn" for="replay-import-file">＋ Importar repetición</label><input id="replay-import-file" type="file" accept=".hbr2,application/octet-stream" class="hidden"><button class="btn" id="replay-refresh">↻ Actualizar</button><span class="muted" id="replay-status"></span></div>
+  <div class="replay-list" id="replay-list"></div>
+</section>
+<section id="embedded-replay" class="hidden" aria-label="Reproductor de repeticiones">
+  <div class="embedded-replay-head"><strong>HATITIX · REPETICIÓN</strong><span id="embedded-replay-title">Partida</span><button id="embedded-replay-close" class="btn">Cerrar</button></div>
+  <div class="embedded-replay-stage"><canvas id="embedded-replay-canvas"></canvas><div id="embedded-replay-message" class="embedded-replay-message">Cargando repetición…</div></div>
+  <div id="embedded-replay-error" class="embedded-replay-error"></div>
+  <div class="embedded-replay-controls"><button id="embedded-replay-play" class="btn main">▶ Reproducir</button><button id="embedded-replay-pause" class="btn">Ⅱ Pausar</button><input id="embedded-replay-seek" type="range" min="0" max="1" value="0" aria-label="Posición de la repetición"><span id="embedded-replay-time" class="embedded-replay-time">0:00 / 0:00</span><select id="embedded-replay-speed" class="field" aria-label="Velocidad"><option value="0.5">0,5×</option><option value="1" selected>1×</option><option value="1.5">1,5×</option><option value="2">2×</option><option value="3">3×</option></select></div>
+</section>
+<section id="room" class="hidden">
+  <div id="lobby" class="rcard">
+    <div class="rhead"><div><small>SALA <span id="r-state" class="chip">EN ESPERA</span></small><h2 id="r-name"></h2></div>
+      <div class="rtools">
+        <div class="bottom" style="margin:0"><button class="btn" id="r-rec">● Grabar</button><button class="btn" id="r-link">Link</button><button class="btn" id="r-set">⚙ Ajustes</button><button class="btn danger" id="r-leave">Salir</button></div>
+        <div class="bottom" style="margin:0"><button class="btn" id="r-auto">Auto</button><button class="btn" id="r-rand">Aleatorio</button><button class="btn" id="r-lock">Bloquear</button><button class="btn" id="r-reset">Reiniciar</button></div>
+      </div></div>
+    <div class="teams">
+      <div class="team red"><div class="throw"><div class="th" id="th-red" title="Click para unirte al equipo rojo"><span>ROJO</span><b id="n-red">0</b></div><button class="arr" id="a-red" title="Pasar a espectadores">→</button></div><div class="pl" id="l-red"></div></div>
+      <div class="team"><div class="throw"><div class="th" id="th-spec" title="Click para pasar a espectadores"><span>ESPECTADORES</span><b id="n-spec">0</b></div></div><div class="pl" id="l-spec"></div></div>
+      <div class="team blue"><div class="throw"><button class="arr" id="a-blue" title="Pasar a espectadores">←</button><div class="th" id="th-blue" title="Click para unirte al equipo azul"><span>AZUL</span><b id="n-blue">0</b></div></div><div class="pl" id="l-blue"></div></div>
+    </div>
+    <div class="muted" id="r-hint"></div>
+    <div class="rfoot">
+      <label>Goles <select id="r-score" class="field"></select></label>
+      <label>Tiempo <select id="r-time" class="field"></select></label>
+      <span class="muted">Estadio: <b id="r-stadium"></b> <button class="btn" id="r-pick" style="padding:5px 10px">Elegir</button></span>
+      <span style="margin-left:auto" class="kbd">P</span>
+      <button class="btn main" id="r-start" style="padding:12px 36px">INICIAR JUEGO</button>
+      <button class="btn" id="r-stop" style="padding:12px 20px">Detener</button>
+      <button class="btn" id="r-close" style="padding:12px 20px">Volver al juego</button>
+    </div>
+  </div>
+  <div id="game" class="hidden">
+    <canvas id="cv"></canvas>
+    <canvas id="goal-fx" aria-hidden="true"></canvas>
+    <div id="hud"><span class="r" id="h-red">0</span><span id="h-time">0:00</span><span class="b" id="h-blue">0</span><span class="cam" id="h-cam">CAM 3 · 1–0</span></div>
+    <div id="gbtns"><button class="btn" id="g-teams" title="Equipos" aria-label="Equipos">☰</button><button class="btn" id="g-chat" title="Mostrar u ocultar chat" aria-label="Mostrar u ocultar chat">▰</button><button class="btn" id="g-stop" title="Detener" aria-label="Detener">■</button><button class="btn" id="g-set" title="Ajustes" aria-label="Ajustes">⚙</button><button class="btn" id="g-fullscreen" title="Pantalla completa de app (con navegación)" aria-label="Pantalla completa de app">⛶</button><button class="btn" id="g-match-fullscreen" title="Pantalla completa de partido (oculta navegación)" aria-label="Pantalla completa de partido">⤢</button><button class="btn danger" id="g-leave" title="Salir" aria-label="Salir">↪</button></div>
+    <div id="stats"><div class="stat" id="stat-fps"><small>FPS</small><b id="h-fps">—</b></div><div class="stat" id="stat-ping"><small>PING</small><b id="h-ping">—</b></div></div>
+    <div id="match-fx"><div class="fx-title" id="fx-title"></div></div>
+  </div>
+  <div id="chat" class="hidden"><div id="chat-log"></div><input id="chat-in" class="field" placeholder="Enter para chatear · escribí / para comandos" autocomplete="off"><div id="chat-suggestions" role="listbox" aria-label="Sugerencias de comandos"></div></div>
+  <div id="settings" class="hidden"><div class="mbox">
+    <h2>AJUSTES DE JUEGO</h2>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Secciones de ajustes"><button class="on" data-settings="graphics">GRÁFICOS</button><button data-settings="performance">RENDIMIENTO</button><button data-settings="gameplay">JUGABILIDAD</button><button data-settings="interface">INTERFAZ</button><button data-settings="controls">CONTROLES</button><button data-settings="custom">PERSONALIZACIÓN</button><button data-settings="profile">RED Y PERFIL</button><button data-settings="codes">CÓDIGOS</button></nav><div class="settings-content">
+    <details class="settings-group active" data-section="graphics" open><summary>GRÁFICOS</summary>
+      <div class="prow"><div><b>Calidad gráfica</b><small>Texturas de más resolución; alta mejora nitidez y usa más memoria/GPU.</small></div><select id="s-quality" class="field"><option value="low">Baja</option><option value="medium" selected>Media</option><option value="high">Alta</option></select></div>
+      <div class="prow"><div><b>Zoom</b><small>Las teclas 1–0 cambian la cámara rápidamente.</small></div><input id="s-zoom" type="range" min="0.5" max="3.2" step="0.05" value="1"></div>
+      <div class="prow"><div><b>Estética Haxball clásica</b><small>Cambia la cancha, césped, HUD, chat y colores de la app al estilo Haxball normal.</small></div><label><input id="s-classic" type="checkbox">Activar</label></div>
+      <div class="prow"><div><b>Resolución de ventana</b><small>Elegí un tamaño y abajo seleccioná la proporción; también funciona con medidas personalizadas. En pantalla completa sin bordes, “estirar” ocupa todo el monitor.</small></div><div class="setting-inline"><select id="s-resolution" class="field"><option value="1200x800">1200 × 800</option><option value="1360x720">1360 × 720</option><option value="800x600">800 × 600 · mínimo recomendado</option><option value="1200x900">1200 × 900 · 4:3</option><option value="1280x720">1280 × 720 · 16:9</option><option value="800x720">800 × 720</option><option value="800x760">800 × 760</option><option value="1920x1080">1920 × 1080</option><option value="custom">Personalizada…</option></select><input id="s-width" class="field hidden" type="number" min="600" max="3840" value="1200" aria-label="Ancho en píxeles"><span id="s-res-x" class="hidden">×</span><input id="s-height" class="field hidden" type="number" min="500" max="2160" value="800" aria-label="Alto en píxeles"><button id="s-res-apply" class="btn">Aplicar</button></div></div>
+      <div class="prow"><div><b>Proporción de imagen</b><small>Se aplica también a resoluciones personalizadas; el alto se ajusta automáticamente. Al elegir 4:3 se activa el estirado para pantalla completa; después podés desactivarlo si preferís márgenes.</small></div><select id="s-aspect" class="field"><option value="original">Original / personalizada</option><option value="4:3">4:3</option><option value="16:9">16:9</option></select></div>
+      <div class="prow"><div><b>Modo de ventana</b><small>Con bordes conserva la barra de Windows; sin bordes activa pantalla completa y oculta los bordes. Podés volver a cambiarlo cuando quieras.</small></div><select id="s-window-mode" class="field"><option value="windowed">Con bordes</option><option value="borderless">Sin bordes (pantalla completa)</option></select></div>
+      <div class="prow"><div><b>Pantalla completa</b><small>Conserva el logo y las pestañas de navegación. Para ocultarlos solo durante el partido, usa el botón ⤢ de la barra de juego.</small></div><label><input id="s-fullscreen" type="checkbox">Activar</label></div>
+      <div class="prow"><div><b>Pantalla estirada</b><small>En pantalla completa, Sí estirar dibuja la cancha en la proporción elegida y deforma toda la imagen para llenar el monitor, igual que el escalado de Windows.</small></div><label><input id="s-stretch" type="checkbox">Sí, estirar</label></div>
+    </details>
+    <details class="settings-group" data-section="gameplay"><summary>JUGABILIDAD</summary>
+      <div class="prow"><div><b>Elegir equipo automáticamente</b><small>Se aplica al entrar a cada sala. “Automático” equilibra equipos; también podés elegir siempre rojo, azul o espectador.</small></div><select id="s-auto-side" class="field"><option value="off">Desactivado</option><option value="auto">Automático (equilibrar)</option><option value="red">Siempre rojo</option><option value="blue">Siempre azul</option><option value="spec">Espectador</option></select></div>
+    </details>
+    <details class="settings-group" data-section="performance" open><summary>RENDIMIENTO</summary>
+      <div class="prow"><div><b>Límite de FPS</b><small>Predeterminado: ilimitado. 0 quita el límite interno; los FPS reales dependen de CPU, GPU y carga de la partida.</small></div><select id="s-fps-limit" class="field"><option value="0">Ilimitado (sin cap interno)</option><option value="30">30 FPS</option><option value="60">60 FPS</option><option value="75">75 FPS</option><option value="90">90 FPS</option><option value="120">120 FPS</option><option value="144">144 FPS</option><option value="240">240 FPS</option><option value="360">360 FPS</option><option value="500">500 FPS</option><option value="1000">1000 FPS</option><option value="2000">2000 FPS</option></select></div>
+      <div class="prow"><label><input id="s-fps" type="checkbox" checked>Mostrar FPS</label><label><input id="s-ping" type="checkbox" checked>Mostrar ping</label></div>
+      <div class="prow"><div><b>Aceleración de renderizado</b><small>Hardware usa la GPU para renderizar y suele dar más estabilidad. Software usa la CPU si la GPU produce tirones. Cambiar reinicia la aplicación.</small></div><div class="setting-inline"><select id="s-acceleration" class="field"><option value="hardware">Hardware (GPU)</option><option value="software">Software (CPU)</option></select><button id="s-acceleration-apply" class="btn">Aplicar y reiniciar</button></div></div>
+    </details>
+    <details class="settings-group" data-section="interface" open><summary>INTERFAZ</summary>
+      <div class="prow"><label><input id="s-chat" type="checkbox" checked>Mostrar chat</label><small>Funciona en el lobby, durante la partida y en pausa. También puedes alternarlo con ▰.</small></div>
+      <div class="prow"><label><input id="s-sound" type="checkbox" checked>Activar sonidos configurados</label><small>Los sonidos de cada evento se personalizan en Personalización.</small></div>
+      <div class="prow"><div><b>Tamaño del chat</b><small>Ajusta el texto y cuánto historial puede ocupar en pantalla.</small></div><div class="setting-inline"><label>Texto <input id="s-chat-size" type="range" min="11" max="22" step="1" value="13"></label><label>Alto <input id="s-chat-height" type="range" min="90" max="420" step="10" value="210"></label></div></div>
+      <div class="prow"><label><input id="s-chat-fade" type="checkbox" checked>Reducir y desvanecer mensajes antiguos</label></div>
+      <div class="prow"><div><b>Posición del chat y marcador</b><small>Arrastralos directamente durante el partido para moverlos.</small></div><button id="s-layout-reset" class="btn">Restablecer posición</button></div>
+    </details>
+    <details class="settings-group" data-section="controls"><summary>CONTROLES</summary>
+      <div class="muted" style="padding:12px 12px 0;font-size:12px">Cada acción admite hasta cinco teclas alternativas. Tocá + Añadir tecla y presioná la tecla; tocá una tecla existente para cambiarla. Escape cancela.</div>
+      <div class="key-bindings">
+        <div class="key-binding"><span>Mover arriba</span><div class="binding-list" data-bind-list="up"></div></div>
+        <div class="key-binding"><span>Mover abajo</span><div class="binding-list" data-bind-list="down"></div></div>
+        <div class="key-binding"><span>Mover izquierda</span><div class="binding-list" data-bind-list="left"></div></div>
+        <div class="key-binding"><span>Mover derecha</span><div class="binding-list" data-bind-list="right"></div></div>
+        <div class="key-binding"><span>Patear</span><div class="binding-list" data-bind-list="kick"></div></div>
+      </div>
+      <div class="prow"><div><b>Restablecer controles</b><small>Vuelve a WASD y espacio. Las flechas y X también quedan como alternativas.</small></div><button id="s-controls-reset" class="btn">Valores predeterminados</button></div>
+    </details>
+    <details class="settings-group" data-section="custom"><summary>PERSONALIZACIÓN</summary>
+      <div class="prow"><div><b>Tus artículos comprados</b><small>Acá aparecen los temas y explosiones que desbloqueaste en la tienda.</small></div></div>
+      <div class="prow hidden" id="pasitos-mode-setting"><div><b>Modo Pasitos</b><small>Cambia los nombres de salas, repeticiones y moneda. Puedes volver al modo normal cuando quieras.</small></div><label class="setting-inline"><span>Activar</span><input id="s-pasitos-mode" type="checkbox"></label></div>
+      <div id="custom-store-items" class="shop-grid"></div>
+      <div class="prow"><div><b>Sonidos por evento</b><small>Elegí un estilo o cargá tu propio audio para cada evento. El archivo propio reemplaza el tono y queda guardado en este dispositivo. Los impactos se activan al tocar la pelota, no al pulsar la tecla.</small></div></div>
+      <div class="prow sound-row"><label>Gol <select id="s-sound-goal" class="field"><option value="off">Silencio</option><option value="soft">Suave</option><option value="arcade">Arcade</option><option value="bass">Grave</option></select></label><label>Golpear la pelota <select id="s-sound-hit" class="field"><option value="off">Silencio</option><option value="soft">Suave</option><option value="arcade">Arcade</option><option value="bass">Grave</option></select></label></div>
+      <div class="prow sound-row"><label>Mensaje de chat <select id="s-sound-chat" class="field"><option value="off">Silencio</option><option value="soft">Suave</option><option value="arcade">Arcade</option><option value="bass">Grave</option></select></label><label>Victoria <select id="s-sound-victory" class="field"><option value="off">Silencio</option><option value="soft">Suave</option><option value="arcade">Arcade</option><option value="bass">Grave</option></select></label></div>
+      <div class="sound-files">
+        <div class="prow sound-file-row"><div><b>Audio para gol</b><small id="s-sound-name-goal">Usar sonido elegido arriba</small></div><input id="s-sound-file-goal" class="file-input" type="file" accept="audio/*" aria-label="Elegir audio para gol"><button class="btn sound-test" data-sound-test="goal">Probar</button><button class="btn file-clear" data-sound-clear="goal">Limpiar</button></div>
+        <div class="prow sound-file-row"><div><b>Audio al golpear la pelota</b><small id="s-sound-name-hit">Usar sonido elegido arriba</small></div><input id="s-sound-file-hit" class="file-input" type="file" accept="audio/*" aria-label="Elegir audio al golpear la pelota"><button class="btn sound-test" data-sound-test="hit">Probar</button><button class="btn file-clear" data-sound-clear="hit">Limpiar</button></div>
+        <div class="prow sound-file-row"><div><b>Audio para mensaje</b><small id="s-sound-name-chat">Usar sonido elegido arriba</small></div><input id="s-sound-file-chat" class="file-input" type="file" accept="audio/*" aria-label="Elegir audio para mensaje"><button class="btn sound-test" data-sound-test="chat">Probar</button><button class="btn file-clear" data-sound-clear="chat">Limpiar</button></div>
+        <div class="prow sound-file-row"><div><b>Audio para victoria</b><small id="s-sound-name-victory">Usar sonido elegido arriba</small></div><input id="s-sound-file-victory" class="file-input" type="file" accept="audio/*" aria-label="Elegir audio para victoria"><button class="btn sound-test" data-sound-test="victory">Probar</button><button class="btn file-clear" data-sound-clear="victory">Limpiar</button></div>
+      </div>
+      <div class="prow"><div><b>Pelota</b><small>Imagen local comprimida para no afectar los FPS.</small></div><input id="s-ball-img" class="file-input" type="file" accept="image/png,image/jpeg,image/webp"><img id="preview-ball" class="custom-preview hidden" alt="Pelota personalizada"><button class="btn file-clear" id="clear-ball-img">Limpiar</button></div>
+      <div class="prow"><div><b>Mi personaje</b><small>Los usuarios HaTitix conectados por WebRTC directo verán tu foto; la foto de equipo puede tener prioridad.</small></div><input id="s-me-img" class="file-input" type="file" accept="image/png,image/jpeg,image/webp"><img id="preview-me" class="custom-preview hidden" alt="Mi personaje personalizado"><button class="btn file-clear" id="clear-me-img">Limpiar</button></div>
+      <div class="prow"><div><b>Otros jugadores / foto de equipo</b><small>La foto se aplica localmente al equipo elegido y, si estás en ese equipo, tiene prioridad sobre tu foto de Mi personaje.</small></div><input id="s-other-img" class="file-input" type="file" accept="image/png,image/jpeg,image/webp"><img id="preview-other" class="custom-preview hidden" alt="Otros jugadores personalizados"><button class="btn file-clear" id="clear-other-img">Limpiar</button></div>
+      <div class="prow"><div><b>Equipo que usa la foto configurada</b><small>La foto de equipo se comparte con otros HaTitix mediante WebRTC directo.</small></div><select id="s-other-team" class="field"><option value="none">Desactivado</option><option value="red">Solo equipo rojo</option><option value="blue">Solo equipo azul</option><option value="all">Todos los equipos</option></select></div>
+      <div class="prow"><div><b>Vista del campo y arcos</b><small>Mejora contraste sin añadir carga al juego.</small></div><select id="s-vision" class="field"><option value="normal">Normal</option><option value="contrast">Alto contraste</option><option value="simple">Simple</option></select></div>
+    </details>
+    <details class="settings-group" data-section="profile"><summary>RED Y PERFIL</summary>
+      <div class="prow"><div><b>Extrapolation</b><small>Sin tope artificial. Valores extremos pueden empeorar la predicción o producir tirones.</small></div><input id="s-ex" class="field" type="number" step="1" value="0"></div>
+      <div class="muted" style="padding:10px 14px;font-size:12px">El nombre y la extrapolation del perfil activo se aplican automáticamente al entrar a una sala.</div>
+      <div class="prow"><div><b>Señalización WebRTC</b><small>Servidor WSS que coordina conexiones; no recibe fotos. Ejemplo: wss://signal.tudominio.com/ws.</small></div><input id="s-skin-relay-url" class="field" type="url" placeholder="wss://signal.tudominio.com/ws" autocomplete="off"></div>
+      <div class="prow"><div><b>Clave de señalización</b><small>La misma clave configurada en el servidor. Se guarda solo en este dispositivo.</small></div><input id="s-skin-relay-token" class="field" type="password" placeholder="Clave compartida" autocomplete="new-password"></div>
+      <div class="prow"><div><b>Priorizar esta instancia como anfitrión de skins</b><small>Si está conectada a la sala, tendrá prioridad. Al salir, otro cliente conectado podrá tomar el relevo.</small></div><label><input id="s-skin-host-prefer" type="checkbox">Priorizarme</label></div>
+      <div class="prow"><div><b>Estado</b><small id="s-skin-relay-status" aria-live="polite">Señalización sin configurar. Las fotos no se envían por el chat ni al servidor.</small></div><button id="s-skin-relay-save" class="btn">Guardar y conectar</button></div>
+    </details>
+    <details class="settings-group" data-section="codes"><summary>CÓDIGOS</summary>
+      <div class="prow"><div><b>Canjear código</b><small>Los códigos se pueden usar una sola vez en este dispositivo: <b>polo dame leche</b> y <b>pasitos</b>.</small></div><div class="setting-inline"><input id="s-redeem-code" class="field" type="text" placeholder="Escribe un código" autocomplete="off"><button id="s-redeem" class="btn">Canjear</button></div><small id="s-redeem-status" class="muted" aria-live="polite"></small></div>
+    </details>
+    </div></div>
+    <div class="muted" style="padding:10px 26px 0;font-size:12px">Los mensajes con <b>!</b> se envían intactos para que los procese el bot o administrador. Usa <b>/help</b> para ver comandos locales.</div>
+    <div class="settings-footer"><button class="btn main" id="s-close">VOLVER</button></div>
+  </div></div>
+</section>
+
+<div id="player-menu" class="hidden" role="menu" aria-label="Acciones de moderación" aria-hidden="true">
+  <div class="menu-heading" id="player-menu-heading"></div>
+  <button type="button" role="menuitem" id="player-admin-action" data-action="admin">Dar administrador</button>
+  <button type="button" role="menuitem" data-action="kick">Expulsar</button>
+  <button type="button" role="menuitem" class="danger" data-action="ban">Banear</button>
+</div>
+
+<div class="modal hidden" id="m-create"><div class="mbox">
+  <h2>CREAR SALA</h2>
+  <div class="prow"><span>Nombre</span><input id="c-name" class="field"></div>
+  <div class="prow"><span>Clave (opcional)</span><input id="c-pass" class="field"></div>
+  <div class="prow"><span>Máx. jugadores <b id="c-maxv">12</b></span><input id="c-max" type="range" min="2" max="30" value="12"></div>
+  <div class="prow"><span>Mostrar en la lista</span><input id="c-show" type="checkbox" checked></div>
+  <div class="muted" style="font-size:12px">Al crear, Haxball te pedirá resolver un captcha.</div>
+  <div class="bottom"><button class="btn" id="c-close" style="margin-left:auto">Cerrar</button><button class="btn main" id="c-ok">Crear</button></div>
+</div></div>
+
+<div class="modal hidden" id="m-pw"><div class="mbox">
+  <h2>ENTRAR A LA SALA</h2>
+  <label for="pw-in" class="muted">Contraseña (si la sala tiene una; si no, dejá vacío)</label><input id="pw-in" class="field" type="password" placeholder="Contraseña de la sala" autocomplete="off">
+  <div class="bottom"><button class="btn" id="pw-cancel">Cancelar</button><button class="btn main" id="pw-ok" style="margin-left:auto">Entrar</button></div>
+</div></div>
+<div class="modal hidden" id="m-stadium"><div class="mbox">
+  <h2>ELEGIR CANCHA / MAPA</h2>
+  <select id="st-list" class="field stadiums" size="10"></select>
+  <div class="setting-inline"><button id="st-save-current" class="btn">Guardar cancha actual</button><label class="btn" for="st-file">＋ Añadir mapa .hbs</label><input id="st-file" class="hidden" type="file" accept=".hbs,.json,application/json"></div>
+  <small id="st-status" class="muted">Los mapas guardados aparecen en esta lista y se pueden usar en la sala.</small>
+  <div class="bottom"><button class="btn danger" id="st-delete">Eliminar guardado</button><button class="btn" id="st-cancel">Cancelar</button><button class="btn main" id="st-ok" style="margin-left:auto">Aplicar</button></div>
+</div></div>
+<div id="toast" class="hidden"></div>
+<script src="bridge.js"></script>
+<script src="court-thumbnails.js"></script>
+<script src="promo-codes.js"></script>
+<script src="skin-webrtc.js"></script>
+<script src="client.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

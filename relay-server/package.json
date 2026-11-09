@@ -1,0 +1,16 @@
+{
+  "name": "hatitix-skin-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Servidor WebSocket de señalización WebRTC; no retransmite imágenes.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
