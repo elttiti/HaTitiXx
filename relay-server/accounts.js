@@ -6,6 +6,10 @@ const scrypt = promisify(crypto.scrypt);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SESSION_DAYS = 30;
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_PROFILE_BODY_BYTES = 4800 * 1024;
+const MAX_BANNER_CHARS = 4200000;
+const MAX_AVATAR_CHARS = 150000;
+const MAX_MESSAGE_CHARS = 500;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMIT = 12;
 
@@ -20,6 +24,7 @@ function safeUser(row) {
         displayName: row.display_name,
         haxballName: row.haxball_name || '',
         bannerUrl: row.banner_url || '',
+        avatarUrl: row.avatar_url || '',
         bannerColor: row.banner_color || '#193b2a',
         fontStyle: row.font_style || 'system',
         createdAt: row.created_at
@@ -35,13 +40,13 @@ function json(response, status, payload) {
     });
     response.end(JSON.stringify(payload));
 }
-function readJson(request) {
+function readJson(request, limit = MAX_BODY_BYTES) {
     return new Promise((resolve, reject) => {
         let bytes = 0;
         const chunks = [];
         request.on('data', (chunk) => {
             bytes += chunk.length;
-            if (bytes > MAX_BODY_BYTES) {
+            if (bytes > limit) {
                 reject(Object.assign(new Error('El contenido es demasiado grande.'), { status: 413 }));
                 request.destroy();
                 return;
@@ -74,6 +79,20 @@ function ipKey(request) {
 
 function createAccountApi(pool) {
     const authAttempts = new Map();
+    const messageBuckets = new Map();
+    const BANNER_DATA_RE = /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+    async function areFriends(a, b) {
+        const low = [a, b].sort()[0], high = [a, b].sort()[1];
+        const { rowCount } = await pool.query('SELECT 1 FROM hatitix_friendships WHERE user_low=$1 AND user_high=$2', [low, high]);
+        return rowCount > 0;
+    }
+    function messageLimited(userId) {
+        const now = Date.now(); let b = messageBuckets.get(userId);
+        if (!b || now - b.start > 30000) b = { start: now, count: 0 };
+        b.count++; messageBuckets.set(userId, b);
+        if (messageBuckets.size > 5000) for (const [k, v] of messageBuckets) if (now - v.start > 30000) messageBuckets.delete(k);
+        return b.count > 20;
+    }
     let schemaReady = false;
 
     async function initialize() {
@@ -92,6 +111,7 @@ function createAccountApi(pool) {
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE (name_key, tag_code)
             );
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
             CREATE TABLE IF NOT EXISTS hatitix_sessions (
                 token_hash CHAR(64) PRIMARY KEY,
                 account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
@@ -117,6 +137,16 @@ function createAccountApi(pool) {
                 PRIMARY KEY (user_low, user_high),
                 CHECK (user_low < user_high)
             );
+            CREATE TABLE IF NOT EXISTS hatitix_messages (
+                id BIGSERIAL PRIMARY KEY,
+                sender_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+                receiver_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+                body TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                read_at TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS hatitix_messages_pair_idx ON hatitix_messages(sender_id, receiver_id, id);
+            CREATE INDEX IF NOT EXISTS hatitix_messages_unread_idx ON hatitix_messages(receiver_id) WHERE read_at IS NULL;
         `);
         schemaReady = true;
     }
@@ -246,15 +276,20 @@ function createAccountApi(pool) {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
             }
             if (request.method === 'PATCH' && url.pathname === '/api/me') {
-                const body = await readJson(request);
+                const body = await readJson(request, MAX_PROFILE_BODY_BYTES);
                 const haxballName = String(body.haxballName ?? user.haxball_name).trim().slice(0, 25);
                 const bannerUrl = String(body.bannerUrl ?? user.banner_url).trim();
                 const bannerColor = String(body.bannerColor ?? user.banner_color).trim();
                 const fontStyle = String(body.fontStyle ?? user.font_style).trim();
-                if (bannerUrl && (!/^https:\/\//i.test(bannerUrl) || bannerUrl.length > 2000)) return json(response, 400, { ok: false, error: 'invalid_banner_url', message: 'El banner debe usar una URL HTTPS de hasta 2000 caracteres.' }), true;
+                const avatarUrl = String(body.avatarUrl ?? user.avatar_url ?? '').trim();
+                const avatarOk = !avatarUrl || (BANNER_DATA_RE.test(avatarUrl) && avatarUrl.length <= MAX_AVATAR_CHARS) || (/^https:\/\//i.test(avatarUrl) && avatarUrl.length <= 2000);
+                if (!avatarOk) return json(response, 400, { ok: false, error: 'invalid_avatar', message: 'La foto de perfil no es válida o pesa demasiado.' }), true;
+                const bannerIsUrl = /^https:\/\//i.test(bannerUrl) && bannerUrl.length <= 2000;
+                const bannerIsData = BANNER_DATA_RE.test(bannerUrl) && bannerUrl.length <= MAX_BANNER_CHARS;
+                if (bannerUrl && !bannerIsUrl && !bannerIsData) return json(response, 400, { ok: false, error: 'invalid_banner_url', message: 'El banner debe ser una URL HTTPS o una imagen subida (GIF de hasta ~3 MB).' }), true;
                 if (!/^#[0-9a-f]{6}$/i.test(bannerColor)) return json(response, 400, { ok: false, error: 'invalid_banner_color', message: 'El color del banner no es válido.' }), true;
                 if (!['system', 'rounded', 'mono', 'serif'].includes(fontStyle)) return json(response, 400, { ok: false, error: 'invalid_font', message: 'La fuente elegida no es válida.' }), true;
-                const updated = await pool.query(`UPDATE hatitix_accounts SET haxball_name=$2,banner_url=$3,banner_color=$4,font_style=$5 WHERE id=$1 RETURNING *`, [user.id, haxballName, bannerUrl, bannerColor, fontStyle]);
+                const updated = await pool.query(`UPDATE hatitix_accounts SET haxball_name=$2,banner_url=$3,banner_color=$4,font_style=$5,avatar_url=$6 WHERE id=$1 RETURNING *`, [user.id, haxballName, bannerUrl, bannerColor, fontStyle, avatarUrl]);
                 json(response, 200, { ok: true, user: safeUser(updated.rows[0]) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/users/search') {
@@ -344,6 +379,35 @@ function createAccountApi(pool) {
                 const low = [user.id, otherId].sort()[0], high = [user.id, otherId].sort()[1];
                 await pool.query('DELETE FROM hatitix_friendships WHERE user_low=$1 AND user_high=$2', [low, high]);
                 json(response, 200, { ok: true }); return true;
+            }
+            if (request.method === 'GET' && url.pathname === '/api/messages/unread') {
+                const { rows } = await pool.query('SELECT sender_id, COUNT(*)::int AS n FROM hatitix_messages WHERE receiver_id=$1 AND read_at IS NULL GROUP BY sender_id', [user.id]);
+                const counts = {}; for (const row of rows) counts[row.sender_id] = row.n;
+                json(response, 200, { ok: true, counts }); return true;
+            }
+            const messageRoute = url.pathname.match(/^\/api\/messages\/([0-9a-f-]{36})$/i);
+            if (messageRoute && UUID_RE.test(messageRoute[1])) {
+                const otherId = messageRoute[1];
+                if (!(await areFriends(user.id, otherId))) return json(response, 403, { ok: false, error: 'not_friends', message: 'Solo puedes chatear con tus amigos.' }), true;
+                if (request.method === 'GET') {
+                    const after = Math.max(0, Number.parseInt(url.searchParams.get('after') || '0', 10) || 0);
+                    const { rows } = await pool.query(`
+                        SELECT * FROM (
+                            SELECT id, sender_id, body, created_at FROM hatitix_messages
+                            WHERE id > $3 AND ((sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1))
+                            ORDER BY id DESC LIMIT 100
+                        ) m ORDER BY id ASC`, [user.id, otherId, after]);
+                    await pool.query('UPDATE hatitix_messages SET read_at=NOW() WHERE sender_id=$1 AND receiver_id=$2 AND read_at IS NULL', [otherId, user.id]);
+                    json(response, 200, { ok: true, messages: rows.map((m) => ({ id: Number(m.id), mine: m.sender_id === user.id, body: m.body, createdAt: m.created_at })) }); return true;
+                }
+                if (request.method === 'POST') {
+                    if (messageLimited(user.id)) return json(response, 429, { ok: false, error: 'rate_limited', message: 'Vas muy rápido. Espera unos segundos.' }), true;
+                    const body = await readJson(request);
+                    const text = String(body.body || '').replace(/\u0000/g, '').trim();
+                    if (!text || text.length > MAX_MESSAGE_CHARS) return json(response, 400, { ok: false, error: 'invalid_message', message: `El mensaje debe tener entre 1 y ${MAX_MESSAGE_CHARS} caracteres.` }), true;
+                    const inserted = await pool.query('INSERT INTO hatitix_messages(sender_id, receiver_id, body) VALUES($1,$2,$3) RETURNING id, created_at', [user.id, otherId, text]);
+                    json(response, 201, { ok: true, message: { id: Number(inserted.rows[0].id), mine: true, body: text, createdAt: inserted.rows[0].created_at } }); return true;
+                }
             }
             json(response, 404, { ok: false, error: 'not_found', message: 'Ruta de API no encontrada.' });
             return true;
