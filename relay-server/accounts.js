@@ -17,7 +17,65 @@ function accountTagKey(value) {
     return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
         .replace(/[\s_.\-·•\u200b-\u200f\u2060\ufeff]+/g, '');
 }
+const FONT_STYLES = ['system', 'rounded', 'mono', 'serif', 'display', 'script', 'comic', 'tech'];
+const ONLINE_WINDOW_MS = 75 * 1000;
+const MAX_PINS = 5;
+const HEX_RE = /^#[0-9a-f]{6}$/i;
+// Códigos especiales. Se guardan como SHA-256 del texto normalizado (minúsculas, sin tildes) para que no queden a la vista.
+const SPECIAL_CODES = Object.freeze({
+    '3baa98c0c93d5dcbdb763722e7806228e1ece61550e3e9af9c1c7014232b2ed8': Object.freeze({
+        grant: 'betatester', points: 500,
+        message: '¡Gracias por probar HaTitix! Recibiste 500 puntos y el pin BETATESTER.'
+    }),
+    '014c98a46aaa02817caf27690482bfe60a63f7d39ebaba334c97cc9c3ffcbeda': Object.freeze({
+        grant: 'owner', points: 0,
+        message: 'Código de dueño aceptado: desbloqueaste la corona 👑 y el pin OWNER.'
+    })
+});
+// Pines que solo se obtienen con un código (el servidor fija su aspecto; el cliente no puede inventarlos).
+const SPECIAL_PINS = Object.freeze({
+    'pin-betatester': Object.freeze({ grant: 'betatester', label: 'BETATESTER', emoji: '🧪', color: '#39ff14', style: 'neon' }),
+    'pin-owner': Object.freeze({ grant: 'owner', label: 'OWNER', emoji: '👑', color: '#ff0000', style: 'rgb' })
+});
+const RESERVED_LABELS = new Set(['owner', 'betatester', 'admin', 'staff', 'moderador', 'mod', 'dueno', 'creador', 'hatitix']);
+function normalizeCode(value) {
+    return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function parsePins(raw) {
+    try {
+        const list = JSON.parse(raw || '[]');
+        return Array.isArray(list) ? list.slice(0, MAX_PINS) : [];
+    } catch (_) { return []; }
+}
+function cleanText(value, max) {
+    return Array.from(String(value ?? '').normalize('NFC').replace(/[\u0000-\u001f\u007f<>]/g, '').trim()).slice(0, max).join('');
+}
+// Devuelve la lista de pines validada o un texto con el motivo del rechazo.
+function validatePins(input, grants) {
+    if (!Array.isArray(input)) return { error: 'Los pines deben ser una lista.' };
+    if (input.length > MAX_PINS) return { error: `Puedes llevar hasta ${MAX_PINS} pines.` };
+    const out = [], seen = new Set();
+    for (const entry of input) {
+        const id = String(entry?.id ?? '').trim();
+        if (!/^[a-z0-9][a-z0-9_-]{1,40}$/i.test(id) || seen.has(id)) return { error: 'Alguno de los pines no es válido.' };
+        seen.add(id);
+        const special = SPECIAL_PINS[id];
+        if (special) {
+            if (!grants.includes(special.grant)) return { error: 'Ese pin solo se desbloquea con su código.' };
+            out.push({ id, label: special.label, emoji: special.emoji, color: special.color, style: special.style });
+            continue;
+        }
+        const label = cleanText(entry.label, 14), emoji = cleanText(entry.emoji, 4), color = String(entry.color || '#2ecc71');
+        if (!label && !emoji) return { error: 'Cada pin necesita un texto o un emoji.' };
+        if (!HEX_RE.test(color)) return { error: 'El color de un pin no es válido.' };
+        if (RESERVED_LABELS.has(accountTagKey(label))) return { error: `El texto "${label}" está reservado.` };
+        out.push({ id, label, emoji, color: color.toLowerCase(), style: 'solid' });
+    }
+    return { pins: out };
+}
 function safeUser(row) {
+    const grants = Array.isArray(row.grants) ? row.grants : [];
+    const crownOn = row.crown_on !== false;
     return {
         id: row.id,
         tag: `${row.display_name}#${row.tag_code}`,
@@ -27,6 +85,10 @@ function safeUser(row) {
         avatarUrl: row.avatar_url || '',
         bannerColor: row.banner_color || '#193b2a',
         fontStyle: row.font_style || 'system',
+        pins: parsePins(row.pins),
+        grants: grants.filter((g) => g === 'owner' || g === 'betatester'),
+        crownOn,
+        crown: grants.includes('owner') && crownOn,
         createdAt: row.created_at
     };
 }
@@ -80,6 +142,30 @@ function ipKey(request) {
 function createAccountApi(pool) {
     const authAttempts = new Map();
     const messageBuckets = new Map();
+    const redeemBuckets = new Map();
+    const lastSeen = new Map();      // id -> última actividad (ms) en memoria
+    const lastPersisted = new Map(); // id -> última vez que se guardó last_seen en la base
+    function touch(user) {
+        const now = Date.now();
+        lastSeen.set(user.id, now);
+        if (now - (lastPersisted.get(user.id) || 0) > 60000) {
+            lastPersisted.set(user.id, now);
+            pool.query('UPDATE hatitix_accounts SET last_seen=NOW() WHERE id=$1', [user.id]).catch(() => {});
+        }
+        if (lastSeen.size > 20000) for (const [k, v] of lastSeen) if (now - v > 3600000) { lastSeen.delete(k); lastPersisted.delete(k); }
+    }
+    function presenceOf(row) {
+        const dbSeen = row.last_seen ? Date.parse(row.last_seen) || 0 : 0;
+        const seen = Math.max(lastSeen.get(row.id) || 0, dbSeen);
+        return { online: seen > 0 && Date.now() - seen < ONLINE_WINDOW_MS, lastSeen: seen ? new Date(seen).toISOString() : null };
+    }
+    function redeemLimited(userId) {
+        const now = Date.now(); let b = redeemBuckets.get(userId);
+        if (!b || now - b.start > 10 * 60 * 1000) b = { start: now, count: 0 };
+        b.count++; redeemBuckets.set(userId, b);
+        if (redeemBuckets.size > 5000) for (const [k, v] of redeemBuckets) if (now - v.start > 10 * 60 * 1000) redeemBuckets.delete(k);
+        return b.count > 10;
+    }
     const BANNER_DATA_RE = /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
     async function areFriends(a, b) {
         const low = [a, b].sort()[0], high = [a, b].sort()[1];
@@ -112,6 +198,10 @@ function createAccountApi(pool) {
                 UNIQUE (name_key, tag_code)
             );
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS pins TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS grants TEXT[] NOT NULL DEFAULT '{}';
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS crown_on BOOLEAN NOT NULL DEFAULT TRUE;
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
             CREATE TABLE IF NOT EXISTS hatitix_sessions (
                 token_hash CHAR(64) PRIMARY KEY,
                 account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
@@ -271,6 +361,7 @@ function createAccountApi(pool) {
 
             const user = await sessionUser(request);
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
+            touch(user);
 
             if (request.method === 'GET' && url.pathname === '/api/me') {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
@@ -288,9 +379,31 @@ function createAccountApi(pool) {
                 const bannerIsData = BANNER_DATA_RE.test(bannerUrl) && bannerUrl.length <= MAX_BANNER_CHARS;
                 if (bannerUrl && !bannerIsUrl && !bannerIsData) return json(response, 400, { ok: false, error: 'invalid_banner_url', message: 'El banner debe ser una URL HTTPS o una imagen subida (GIF de hasta ~3 MB).' }), true;
                 if (!/^#[0-9a-f]{6}$/i.test(bannerColor)) return json(response, 400, { ok: false, error: 'invalid_banner_color', message: 'El color del banner no es válido.' }), true;
-                if (!['system', 'rounded', 'mono', 'serif'].includes(fontStyle)) return json(response, 400, { ok: false, error: 'invalid_font', message: 'La fuente elegida no es válida.' }), true;
-                const updated = await pool.query(`UPDATE hatitix_accounts SET haxball_name=$2,banner_url=$3,banner_color=$4,font_style=$5,avatar_url=$6 WHERE id=$1 RETURNING *`, [user.id, haxballName, bannerUrl, bannerColor, fontStyle, avatarUrl]);
+                if (!FONT_STYLES.includes(fontStyle)) return json(response, 400, { ok: false, error: 'invalid_font', message: 'La fuente elegida no es válida.' }), true;
+                const grants = Array.isArray(user.grants) ? user.grants : [];
+                let pinsJson = user.pins || '[]';
+                if (body.pins !== undefined) {
+                    const checked = validatePins(body.pins, grants);
+                    if (checked.error) return json(response, 400, { ok: false, error: 'invalid_pins', message: checked.error }), true;
+                    pinsJson = JSON.stringify(checked.pins);
+                }
+                const crownOn = body.crownOn === undefined ? user.crown_on !== false : body.crownOn === true;
+                const updated = await pool.query(`UPDATE hatitix_accounts SET haxball_name=$2,banner_url=$3,banner_color=$4,font_style=$5,avatar_url=$6,pins=$7,crown_on=$8 WHERE id=$1 RETURNING *`, [user.id, haxballName, bannerUrl, bannerColor, fontStyle, avatarUrl, pinsJson, crownOn]);
                 json(response, 200, { ok: true, user: safeUser(updated.rows[0]) }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/presence') {
+                json(response, 200, { ok: true }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/redeem') {
+                if (redeemLimited(user.id)) return json(response, 429, { ok: false, error: 'rate_limited', message: 'Demasiados intentos. Espera unos minutos.' }), true;
+                const body = await readJson(request);
+                const hash = crypto.createHash('sha256').update(normalizeCode(body.code)).digest('hex');
+                const reward = SPECIAL_CODES[hash];
+                if (!reward) return json(response, 404, { ok: false, error: 'invalid_code', message: 'Ese código no existe.' }), true;
+                // Canje atómico: solo se concede si la cuenta aún no tiene esta recompensa.
+                const result = await pool.query('UPDATE hatitix_accounts SET grants = array_append(grants, $2::text) WHERE id=$1 AND NOT ($2::text = ANY(grants)) RETURNING *', [user.id, reward.grant]);
+                if (!result.rowCount) return json(response, 409, { ok: false, error: 'already_redeemed', message: 'Esta cuenta ya canjeó ese código.' }), true;
+                json(response, 200, { ok: true, points: reward.points, grant: reward.grant, message: reward.message, user: safeUser(result.rows[0]) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/users/search') {
                 const tag = String(url.searchParams.get('tag') || '').trim();
@@ -306,7 +419,7 @@ function createAccountApi(pool) {
                     JOIN hatitix_accounts a ON a.id = CASE WHEN f.user_low=$1 THEN f.user_high ELSE f.user_low END
                     WHERE f.user_low=$1 OR f.user_high=$1 ORDER BY a.display_name
                 `, [user.id]);
-                json(response, 200, { ok: true, friends: rows.map(safeUser) }); return true;
+                json(response, 200, { ok: true, friends: rows.map((row) => ({ ...safeUser(row), ...presenceOf(row) })) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/friends/requests') {
                 const { rows } = await pool.query(`
