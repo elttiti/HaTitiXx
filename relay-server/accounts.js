@@ -38,6 +38,12 @@ const SPECIAL_PINS = Object.freeze({
     'pin-owner': Object.freeze({ grant: 'owner', label: 'OWNER', emoji: '👑', color: '#ff0000', style: 'rgb' })
 });
 const RESERVED_LABELS = new Set(['owner', 'betatester', 'admin', 'staff', 'moderador', 'mod', 'dueno', 'creador', 'hatitix']);
+// Detecta el nombre reservado aunque lo disfracen (0wner, ow ner, OWNER123…). Debe coincidir con pins.js del cliente.
+function isReservedLabel(text) {
+    const k = String(text ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
+        .replace(/0/g, 'o').replace(/[1!|]/g, 'i').replace(/3/g, 'e').replace(/[4@]/g, 'a').replace(/[5$]/g, 's').replace(/7/g, 't').replace(/[^a-z]/g, '');
+    return !!k && [...RESERVED_LABELS].some((word) => k === word || (word.length >= 5 && k.includes(word)));
+}
 function normalizeCode(value) {
     return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -68,7 +74,7 @@ function validatePins(input, grants) {
         const label = cleanText(entry.label, 14), emoji = cleanText(entry.emoji, 4), color = String(entry.color || '#2ecc71');
         if (!label && !emoji) return { error: 'Cada pin necesita un texto o un emoji.' };
         if (!HEX_RE.test(color)) return { error: 'El color de un pin no es válido.' };
-        if (RESERVED_LABELS.has(accountTagKey(label))) return { error: `El texto "${label}" está reservado.` };
+        if (isReservedLabel(label) || isReservedLabel(label + emoji)) return { error: `No puedes crear un pin con "${label}": ese nombre está reservado.` };
         out.push({ id, label, emoji, color: color.toLowerCase(), style: 'solid' });
     }
     return { pins: out };
@@ -237,6 +243,12 @@ function createAccountApi(pool) {
             );
             CREATE INDEX IF NOT EXISTS hatitix_messages_pair_idx ON hatitix_messages(sender_id, receiver_id, id);
             CREATE INDEX IF NOT EXISTS hatitix_messages_unread_idx ON hatitix_messages(receiver_id) WHERE read_at IS NULL;
+            CREATE TABLE IF NOT EXISTS hatitix_account_stats (
+                account_id UUID PRIMARY KEY REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+                goals BIGINT NOT NULL DEFAULT 0,
+                hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
         `);
         schemaReady = true;
     }
@@ -390,6 +402,33 @@ function createAccountApi(pool) {
                 const crownOn = body.crownOn === undefined ? user.crown_on !== false : body.crownOn === true;
                 const updated = await pool.query(`UPDATE hatitix_accounts SET haxball_name=$2,banner_url=$3,banner_color=$4,font_style=$5,avatar_url=$6,pins=$7,crown_on=$8 WHERE id=$1 RETURNING *`, [user.id, haxballName, bannerUrl, bannerColor, fontStyle, avatarUrl, pinsJson, crownOn]);
                 json(response, 200, { ok: true, user: safeUser(updated.rows[0]) }); return true;
+            }
+            if (request.method === 'PUT' && url.pathname === '/api/ranking/me') {
+                const body = await readJson(request);
+                const goals = Math.max(0, Math.min(1000000000, Math.floor(Number(body.goals) || 0)));
+                const hours = Math.max(0, Math.min(100000000, Number(body.hours) || 0));
+                await pool.query(`
+                    INSERT INTO hatitix_account_stats(account_id,goals,hours) VALUES($1,$2,$3)
+                    ON CONFLICT (account_id) DO UPDATE SET
+                        goals=GREATEST(hatitix_account_stats.goals, EXCLUDED.goals),
+                        hours=GREATEST(hatitix_account_stats.hours, EXCLUDED.hours),
+                        updated_at=NOW()
+                `, [user.id, goals, hours]);
+                json(response, 200, { ok: true }); return true;
+            }
+            if (request.method === 'GET' && url.pathname === '/api/ranking/friends') {
+                const { rows } = await pool.query(`
+                    SELECT a.id, a.display_name, a.tag_code, COALESCE(s.goals,0)::bigint AS goals,
+                           COALESCE(s.hours,0)::double precision AS hours
+                    FROM hatitix_accounts a
+                    LEFT JOIN hatitix_account_stats s ON s.account_id=a.id
+                    WHERE a.id=$1 OR a.id IN (
+                        SELECT CASE WHEN f.user_low=$1 THEN f.user_high ELSE f.user_low END
+                        FROM hatitix_friendships f WHERE f.user_low=$1 OR f.user_high=$1
+                    )
+                    ORDER BY goals DESC, hours DESC, a.display_name ASC LIMIT 100
+                `, [user.id]);
+                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0 })) }); return true;
             }
             if (request.method === 'POST' && url.pathname === '/api/presence') {
                 json(response, 200, { ok: true }); return true;
