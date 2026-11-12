@@ -5,6 +5,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { WebSocketServer, WebSocket } = require('ws');
+const { Pool } = require('pg');
+const { createAccountApi } = require('./accounts');
 
 function loadLocalEnvFile() {
     try {
@@ -36,9 +38,16 @@ const MAX_PLAYERS_PER_ROOM = 32;
 const MAX_TOTAL_CLIENTS = 1000;
 const HOST_MIN_HOLD_MS = 15000;
 const HOST_IMPROVEMENT_MS = 8;
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim();
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('PORT debe ser un puerto válido.');
 if (RELAY_TOKEN.length < 32 || RELAY_TOKEN.startsWith('REEMPLAZAR_')) throw new Error('Configurá un RELAY_TOKEN aleatorio de al menos 32 caracteres.');
+
+const accountPool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL, max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 }) : null;
+const accountApi = accountPool ? createAccountApi(accountPool) : null;
+accountPool?.on('error', (error) => console.error('Conexión inactiva de PostgreSQL falló:', error.message));
+if (accountApi) accountApi.initialize().then(() => console.log('API de cuentas conectada a PostgreSQL.')).catch((error) => console.error('No se pudo preparar la base de cuentas:', error.message));
+else console.warn('DATABASE_URL no está configurada; la señalización WebRTC seguirá activa y la API de cuentas responderá temporalmente no disponible.');
 
 const rooms = new Map();
 const safeEqual = (left, right) => {
@@ -140,10 +149,21 @@ function validSignal(message) {
         && (c.usernameFragment === undefined || c.usernameFragment === null || typeof c.usernameFragment === 'string' && c.usernameFragment.length <= 128);
 }
 
-const server = http.createServer((request, response) => {
-    if (request.method === 'GET' && request.url === '/health') {
+const server = http.createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (request.method === 'GET' && url.pathname === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify({ ok: true, service: 'hatitix-webrtc-signaling', version: 3, mediaRelay: false }));
+        response.end(JSON.stringify({ ok: true, service: 'hatitix-webrtc-signaling', version: 4, mediaRelay: false, accounts: !!accountApi?.isReady() }));
+        return;
+    }
+    if (url.pathname.startsWith('/api/')) {
+        if (accountApi) return void await accountApi.handle(request, response, url);
+        response.writeHead(request.method === 'OPTIONS' ? 204 : 503, {
+            'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
+            'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+            'access-control-allow-headers': 'authorization, content-type'
+        });
+        response.end(request.method === 'OPTIONS' ? undefined : JSON.stringify({ ok: false, error: 'database_unavailable', message: 'La base de cuentas todavía no está configurada.' }));
         return;
     }
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -265,4 +285,5 @@ const heartbeat = setInterval(() => {
     }
 }, 30000);
 server.on('close', () => clearInterval(heartbeat));
+server.on('close', () => accountPool?.end().catch(() => {}));
 server.listen(PORT, HOST, () => console.log(`HaTitix WebRTC signaling escuchando en ${HOST}:${PORT}`));
