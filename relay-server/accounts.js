@@ -430,6 +430,16 @@ function createAccountApi(pool) {
                 `, [user.id]);
                 json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0 })) }); return true;
             }
+            if (request.method === 'GET' && url.pathname === '/api/ranking/global') {
+                const { rows } = await pool.query(`
+                    SELECT a.id, a.display_name, a.tag_code, COALESCE(s.goals,0)::bigint AS goals,
+                           COALESCE(s.hours,0)::double precision AS hours
+                    FROM hatitix_accounts a
+                    LEFT JOIN hatitix_account_stats s ON s.account_id=a.id
+                    ORDER BY goals DESC, hours DESC, a.display_name ASC LIMIT 100
+                `);
+                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0 })) }); return true;
+            }
             if (request.method === 'POST' && url.pathname === '/api/presence') {
                 json(response, 200, { ok: true }); return true;
             }
