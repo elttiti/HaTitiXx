@@ -258,6 +258,16 @@ wss.on('connection', (socket) => {
             for (const [id, oldParty] of parties) { oldParty.members.delete(socket.playerId); if (!oldParty.members.size) parties.delete(id); }
             party.members.add(socket.playerId); socket.partyId = partyId; socket.partyLeader = false; broadcastParty(partyId); return;
         }
+        if (message.type === 'party-leave') {
+            const party = parties.get(socket.partyId);
+            if (party) {
+                party.members.delete(socket.playerId);
+                if (party.leaderId === socket.playerId) party.leaderId = party.members.values().next().value;
+                if (!party.members.size) parties.delete(socket.partyId); else broadcastParty(socket.partyId);
+            }
+            socket.partyId = null; socket.partyLeader = false;
+            send(socket, { type: 'party-left' }); return;
+        }
         if (message.type === 'party-room-change') {
             const party = parties.get(socket.partyId);
             const roomId = String(message.roomId || ''); const link = String(message.link || '').slice(0, 300);
