@@ -59,12 +59,13 @@ async function handleCommunityMaps({ request, url, response, pool, user, json, r
             return true;
         }
         const name = cleanName(body?.name);
+        const type = body?.type === 'oficial' ? 'oficial' : 'comunidad';
         const authorName = cleanName(user.display_name || user.displayName || user.name || 'Jugador');
         const id = crypto.randomUUID();
         try {
             await pool.query(
-                'INSERT INTO hatitix_maps (id, name, author_id, author_name, data) VALUES ($1, $2, $3, $4, $5)',
-                [id, name, user.id, authorName, data]
+                'INSERT INTO hatitix_maps (id, name, author_id, author_name, data, type) VALUES ($1, $2, $3, $4, $5, $6)',
+                [id, name, user.id, authorName, data, type]
             );
         } catch (error) {
             console.error('[community-maps] No se pudo guardar:', error?.message || error);
@@ -83,7 +84,7 @@ async function handleCommunityMaps({ request, url, response, pool, user, json, r
             const [countResult, mapResult] = await Promise.all([
                 pool.query('SELECT COUNT(*) AS total FROM hatitix_maps'),
                 pool.query(
-                    'SELECT id, name, author_name, created_at FROM hatitix_maps ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2',
+                    'SELECT id, name, author_name, created_at, likes, downloads, type FROM hatitix_maps ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2',
                     [limit, offset]
                 )
             ]);
@@ -105,7 +106,7 @@ async function handleCommunityMaps({ request, url, response, pool, user, json, r
             return true;
         }
         try {
-            const result = await pool.query('SELECT data FROM hatitix_maps WHERE id = $1', [id]);
+            const result = await pool.query('UPDATE hatitix_maps SET downloads = downloads + 1 WHERE id = $1 RETURNING data', [id]);
             if (!result.rows?.[0]) {
                 safeJson(response, 404, { ok: false, message: 'Mapa no encontrado.' }, json);
                 return true;
@@ -116,6 +117,17 @@ async function handleCommunityMaps({ request, url, response, pool, user, json, r
             safeJson(response, 500, { ok: false, message: 'No se pudo descargar el mapa.' }, json);
         }
         return true;
+    }
+    if (method === 'POST' && pathname === '/api/maps/like') {
+        let body; try { body = await readJson(request); } catch (_) { safeJson(response, 400, { ok: false, message: 'Datos inválidos.' }, json); return true; }
+        if (!MAP_UUID_RE.test(String(body?.id || ''))) { safeJson(response, 400, { ok: false, message: 'ID de mapa inválido.' }, json); return true; }
+        await pool.query('UPDATE hatitix_maps SET likes = likes + 1 WHERE id = $1', [body.id]);
+        safeJson(response, 200, { ok: true }, json); return true;
+    }
+    if (method === 'POST' && pathname === '/api/maps/report') {
+        let body; try { body = await readJson(request); } catch (_) { body = {}; }
+        console.warn('[community-maps] Mapa reportado:', body?.id, String(body?.reason || '').slice(0, 200));
+        safeJson(response, 200, { ok: true }, json); return true;
     }
     return false;
 }

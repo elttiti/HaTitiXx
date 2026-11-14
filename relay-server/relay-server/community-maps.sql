@@ -5,7 +5,10 @@ CREATE TABLE IF NOT EXISTS hatitix_maps (
     author_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
     author_name TEXT NOT NULL,
     data TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    likes INTEGER NOT NULL DEFAULT 0,
+    downloads INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL DEFAULT 'comunidad'
 );
 
 CREATE INDEX IF NOT EXISTS hatitix_maps_created_at_id_idx
