@@ -52,7 +52,7 @@ Guarda como `.env`, no como `.env.txt`. No compartas el archivo ni publiques el 
 
 ## 3. Probar el servidor localmente
 
-En Windows, también puedes ejecutar `iniciar-relay.bat` dentro de `relay-server`: instala `ws` con `npm ci` si falta y, si no existe `.env`, lo crea desde la plantilla, abre el Bloc de notas y te indica que debes configurar el token antes de volver a iniciarlo.
+En Windows, también puedes ejecutar `iniciar-relay.bat` dentro de `relay-server`: instala `ws` con `npm ci` si falta y, si no existe `.env`, crea una plantilla (aunque no se haya copiado `.env.example`), abre el Bloc de notas y te indica que debes configurar el token antes de volver a iniciarlo.
 
 Para hacerlo manualmente, en PowerShell desde `C:\HaTitixSignal`, instala dependencias y arranca el servicio:
 
@@ -67,7 +67,7 @@ Deja esta ventana abierta. En otra ventana de PowerShell verifica:
 Invoke-RestMethod http://127.0.0.1:8787/health
 ```
 
-La respuesta debe indicar `ok: True`, `service: hatitix-webrtc-signaling`, `version: 2` y `mediaRelay: False`. Esto confirma que el proceso está activo y **no es un relay de fotos**.
+La respuesta debe indicar `ok: True`, `service: hatitix-webrtc-signaling`, `version: 3` y `mediaRelay: False`. Esto confirma que el proceso está activo y **no es un relay de fotos**.
 
 Para una prueba en la misma PC, configura HaTitix con `ws://localhost:8787/ws` y el mismo token. La app permite `ws://` solo en localhost; para conexiones públicas exige `wss://`.
 
@@ -130,7 +130,7 @@ Si ya habías desplegado la versión anterior del servidor que retransmitía fot
 ## 6. Alcance, privacidad y límites
 
 - Las imágenes WebP comprimidas se envían por un canal WebRTC directo al anfitrión de la sala de skins; este las distribuye a los demás por sus canales WebRTC. **El servidor WSS solo ve autenticación, ID de sala/jugador, ping, SDP y candidatos ICE; no recibe las fotos.**
-- El anfitrión se elige usando el ping de sala informado por los clientes; el servidor suaviza varias muestras y evita cambios por fluctuaciones pequeñas. Si el anfitrión sale, se elige otro entre quienes siguen conectados.
+- Por defecto, el anfitrión se elige usando el ping de sala informado por los clientes; el servidor suaviza varias muestras y evita cambios por fluctuaciones pequeñas. Si alguien activa **Priorizarme** en Red y Perfil, se prioriza a ese cliente; entre varias preferencias manuales gana el de mejor ping. Si sale, se elige otro cliente conectado.
 - El servidor de señalización sigue siendo necesario y debe estar disponible para conexiones y cambios de anfitrión. El código de esta carpeta no crea una dirección pública por sí solo.
 - El cliente usa STUN público para intentar conexiones directas, pero esta versión no incluye TURN. Algunas redes con NAT estricto/firewall pueden impedir WebRTC; en ese caso el estado avisará que no se pudo establecer el canal. No se enviará la foto al servidor como alternativa.
 - ICE puede exponer direcciones de red entre pares, según navegador y red. La señalización no identifica la cuenta Haxball real; el token compartido no impide completamente la suplantación de IDs. Compártelo solo con personas de confianza.
