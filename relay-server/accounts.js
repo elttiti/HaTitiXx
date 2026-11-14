@@ -1,5 +1,7 @@
 'use strict';
 
+const { handleCommunityMaps } = require('./community-maps');
+
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const scrypt = promisify(crypto.scrypt);
@@ -249,6 +251,14 @@ function createAccountApi(pool) {
                 hours DOUBLE PRECISION NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            CREATE TABLE IF NOT EXISTS hatitix_maps (
+                id UUID PRIMARY KEY, name TEXT NOT NULL, author_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
+                author_name TEXT NOT NULL, data TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                likes INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, type TEXT NOT NULL DEFAULT 'comunidad'
+            );
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS likes INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS downloads INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'comunidad';
         `);
         schemaReady = true;
     }
@@ -374,6 +384,7 @@ function createAccountApi(pool) {
             const user = await sessionUser(request);
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
+            if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
 
             if (request.method === 'GET' && url.pathname === '/api/me') {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;

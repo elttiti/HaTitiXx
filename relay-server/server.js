@@ -50,6 +50,7 @@ if (accountApi) accountApi.initialize().then(() => console.log('API de cuentas c
 else console.warn('DATABASE_URL no está configurada; la señalización WebRTC seguirá activa y la API de cuentas responderá temporalmente no disponible.');
 
 const rooms = new Map();
+const parties = new Map(); // partyId -> { leaderId, members: Set(playerIds) }
 const safeEqual = (left, right) => {
     const a = Buffer.from(String(left));
     const b = Buffer.from(String(right));
@@ -121,7 +122,23 @@ function broadcastTopology(room) {
     const message = topology(room);
     for (const peer of room.peers.values()) send(peer.socket, message);
 }
+function partySockets(party) {
+    return [...wss.clients].filter((client) => client.authenticated && party.members.has(client.playerId));
+}
+function broadcastParty(partyId) {
+    const party = parties.get(partyId); if (!party) return;
+    const payload = { type: 'party-update', partyId, leaderId: party.leaderId, members: [...party.members] };
+    for (const client of partySockets(party)) send(client, payload);
+}
 function removeClient(socket) {
+    for (const [partyId, party] of parties) {
+        party.members.delete(socket.playerId);
+        if (party.leaderId === socket.playerId) {
+            const next = party.members.values().next().value;
+            if (next === undefined) parties.delete(partyId); else party.leaderId = next;
+        }
+        if (parties.has(partyId)) broadcastParty(partyId);
+    }
     const roomId = socket.roomId;
     if (!roomId) return;
     const room = rooms.get(roomId);
@@ -227,6 +244,28 @@ wss.on('connection', (socket) => {
         const room = rooms.get(socket.roomId);
         const peer = room?.peers.get(socket.playerId);
         if (!room || !peer || peer.socket !== socket) { send(socket, { type: 'error', code: 'not_joined' }); return; }
+
+        if (message.type === 'party-create') {
+            const partyId = crypto.randomBytes(4).toString('hex');
+            for (const [id, party] of parties) { party.members.delete(socket.playerId); if (!party.members.size) parties.delete(id); }
+            parties.set(partyId, { leaderId: socket.playerId, members: new Set([socket.playerId]) });
+            socket.partyId = partyId; socket.partyLeader = true;
+            send(socket, { type: 'party-created', partyId }); broadcastParty(partyId); return;
+        }
+        if (message.type === 'party-join') {
+            const partyId = String(message.partyId || ''); const party = parties.get(partyId);
+            if (!/^[a-f0-9]{8}$/i.test(partyId) || !party) { send(socket, { type: 'error', code: 'party_not_found' }); return; }
+            for (const [id, oldParty] of parties) { oldParty.members.delete(socket.playerId); if (!oldParty.members.size) parties.delete(id); }
+            party.members.add(socket.playerId); socket.partyId = partyId; socket.partyLeader = false; broadcastParty(partyId); return;
+        }
+        if (message.type === 'party-room-change') {
+            const party = parties.get(socket.partyId);
+            const roomId = String(message.roomId || ''); const link = String(message.link || '').slice(0, 300);
+            if (party && party.leaderId === socket.playerId && validRoomId(roomId) && /^https?:\/\//i.test(link)) {
+                for (const client of partySockets(party)) if (client !== socket) send(client, { type: 'party-follow', roomId, link });
+            }
+            return;
+        }
 
         if (message.type === 'host-preference') {
             if (typeof message.preferHost !== 'boolean') { send(socket, { type: 'error', code: 'invalid_host_preference' }); return; }
