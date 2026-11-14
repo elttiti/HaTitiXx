@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workshop Titix · Navegador</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101513;color:#edf4ee;font:14px Segoe UI,Tahoma,sans-serif}
+#toolbar{height:58px;display:flex;align-items:center;gap:8px;padding:8px 12px;background:linear-gradient(180deg,#1b2820,#111913);border-bottom:1px solid #35483a;user-select:none}
+button{height:36px;min-width:38px;padding:0 11px;border:1px solid #3b5745;border-radius:7px;background:#202c24;color:#edf4ee;font-weight:700;cursor:pointer}button:hover{background:#2d4133;border-color:#64df8b}button:disabled{opacity:.42;cursor:default}
+#address{height:36px;min-width:0;flex:1;border:1px solid #405c49;border-radius:8px;padding:0 13px;background:#0c110e;color:#f4fff5;outline:none}#address:focus{border-color:#62e88c;box-shadow:0 0 0 2px #62e88c30}
+#brand{font-weight:900;letter-spacing:.7px;color:#8bf0aa;white-space:nowrap}.hint{color:#96a69a;font-size:11px;white-space:nowrap}
+@media(max-width:700px){#brand,.hint{display:none}#toolbar{gap:5px;padding:7px}button{min-width:34px;padding:0 8px}}
+</style>
+</head>
+<body>
+<header id="toolbar">
+  <span id="brand">WORKSHOP TITIX</span>
+  <button id="back" type="button" title="Atrás" aria-label="Atrás">←</button>
+  <button id="forward" type="button" title="Adelante" aria-label="Adelante">→</button>
+  <button id="reload" type="button" title="Recargar" aria-label="Recargar">⟳</button>
+  <input id="address" type="url" spellcheck="false" aria-label="Dirección web" placeholder="https://…">
+  <button id="go" type="button">Ir</button>
+  <span id="hint" class="hint">Navegador integrado de HaTitix</span>
+  <button id="close" type="button" title="Cerrar navegador" aria-label="Cerrar navegador">✕</button>
+</header>
+<script src="workshop-browser-ui.js"></script>
+</body>
+</html>
