@@ -71,15 +71,6 @@ CREATE TABLE IF NOT EXISTS hatitix_party_invites (
 );
 CREATE INDEX IF NOT EXISTS hatitix_party_invites_to_idx ON hatitix_party_invites(to_id);
 
-ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS challenger_report TEXT;
-ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS rival_report TEXT;
-ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
-ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS resolution TEXT;
-CREATE INDEX IF NOT EXISTS hatitix_bets_challenger_idx ON hatitix_bets(challenger_id, status);
-CREATE INDEX IF NOT EXISTS hatitix_bets_rival_idx ON hatitix_bets(rival_id, status);
--- Las apuestas antiguas "contra la casa" (sin rival) creaban puntos de la nada: se cierran.
-UPDATE hatitix_bets SET status = 'cancelled', resolution = 'legacy', settled_at = NOW()
-    WHERE rival_id IS NULL AND status IN ('pending', 'accepted');
 `;
 
 function cleanText(value, max, fallback = '') {
@@ -485,7 +476,7 @@ async function handleSocial(ctx) {
     const full = { ...ctx, ok: reply };
     if (path === '/api/groups' || path.startsWith('/api/groups/')) return (await groupsRoutes(full)) === true;
     if (path === '/api/parties' || path.startsWith('/api/parties/')) return (await partiesRoutes(full)) === true;
-    if (path.startsWith('/api/bet/')) return (await betsRoutes(full)) === true;
+    // Las apuestas siguen gestionadas por accounts.js para conservar el flujo actual del cliente.
     return false;
 }
 

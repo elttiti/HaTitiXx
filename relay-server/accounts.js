@@ -1,6 +1,7 @@
 'use strict';
 
 const { handleCommunityMaps } = require('./community-maps');
+const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -278,6 +279,8 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
+        // Tablas persistentes de grupos y Parties. Se ejecuta después de crear hatitix_accounts.
+        await pool.query(SOCIAL_SCHEMA_SQL);
         schemaReady = true;
     }
 
@@ -403,6 +406,7 @@ function createAccountApi(pool) {
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
             if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
+            if (await handleSocial({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
             if (request.method === 'GET' && url.pathname === '/api/news') {
                 json(response, 200, { ok: true, news: [
                     { id: 1, title: '¡Bienvenidos a HaTitix!', date: '2026-11-14', content: 'Ya está disponible la Workshop de mapas comunitarios.' },
