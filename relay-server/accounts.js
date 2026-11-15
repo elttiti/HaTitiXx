@@ -1,7 +1,6 @@
 'use strict';
 
 const { handleCommunityMaps } = require('./community-maps');
-const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -279,7 +278,6 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
-        await pool.query(SOCIAL_SCHEMA_SQL);
         schemaReady = true;
     }
 
@@ -405,13 +403,49 @@ function createAccountApi(pool) {
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
             if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
-            if (await handleSocial({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
             if (request.method === 'GET' && url.pathname === '/api/news') {
                 json(response, 200, { ok: true, news: [
                     { id: 1, title: '¡Bienvenidos a HaTitix!', date: '2026-11-14', content: 'Ya está disponible la Workshop de mapas comunitarios.' },
                     { id: 2, title: 'Torneo de fin de semana', date: '2026-11-14', content: 'Prepárate para los próximos partidos de Futsal.' }
                 ] }); return true;
             }
+            if (request.method === 'POST' && url.pathname === '/api/bet/create') {
+                const body = await readJson(request);
+                const amount = Number(body.amount);
+                const roomId = String(body.roomId || '').trim();
+                const rivalId = String(body.rivalId || '').trim();
+                const team = String(body.team || '').toLowerCase();
+                if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1000000) return json(response, 400, { ok: false, message: 'El monto debe ser un número entero entre 1 y 1.000.000.' }), true;
+                if (!['red', 'blue'].includes(team)) return json(response, 400, { ok: false, message: 'Elegí el equipo rojo o azul.' }), true;
+                if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId)) return json(response, 400, { ok: false, message: 'Sala inválida.' }), true;
+                if (rivalId && !UUID_RE.test(rivalId)) return json(response, 400, { ok: false, message: 'Rival inválido.' }), true;
+                const result = await pool.query(
+                    'INSERT INTO hatitix_bets(id, room_id, challenger_id, rival_id, amount, challenger_team) VALUES($1,$2,$3,$4,$5,$6) RETURNING id, status, amount, challenger_team, created_at',
+                    [crypto.randomUUID(), roomId, user.id, rivalId || null, amount, team]
+                );
+                json(response, 201, { ok: true, message: `Apuesta creada: ${amount} puntos al equipo ${team === 'red' ? 'rojo' : 'azul'}. Se liquidará al terminar.`, bet: result.rows[0] }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/bet/settle') {
+                const body = await readJson(request);
+                const betId = String(body.betId || '').trim();
+                const winnerTeam = String(body.winnerTeam || '').toLowerCase();
+                if (!UUID_RE.test(betId) || !['red', 'blue'].includes(winnerTeam)) return json(response, 400, { ok: false, message: 'Apuesta o equipo ganador inválido.' }), true;
+                const client = await pool.connect();
+                try {
+                    await client.query('BEGIN');
+                    const betResult = await client.query('SELECT * FROM hatitix_bets WHERE id=$1 AND challenger_id=$2 FOR UPDATE', [betId, user.id]);
+                    const bet = betResult.rows[0];
+                    if (!bet) { await client.query('ROLLBACK'); return json(response, 404, { ok: false, message: 'Apuesta no encontrada.' }), true; }
+                    if (bet.status === 'settled') { const same = await client.query('SELECT points FROM hatitix_accounts WHERE id=$1', [user.id]); await client.query('COMMIT'); return json(response, 200, { ok: true, message: 'La apuesta ya estaba liquidada.', points: Number(same.rows[0]?.points || 0) }), true; }
+                    const won = bet.challenger_team === winnerTeam;
+                    const delta = won ? Number(bet.amount) : -Number(bet.amount);
+                    const updated = await client.query('UPDATE hatitix_accounts SET points=GREATEST(0, points+$2) WHERE id=$1 RETURNING points', [user.id, delta]);
+                    await client.query("UPDATE hatitix_bets SET status='settled', winner_team=$2, settled_at=NOW() WHERE id=$1", [betId, winnerTeam]);
+                    await client.query('COMMIT');
+                    json(response, 200, { ok: true, won, delta, points: Number(updated.rows[0].points), message: won ? `Ganaste ${bet.amount} puntos.` : `Perdiste ${bet.amount} puntos.` }); return true;
+                } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+            }
+
             if (request.method === 'GET' && url.pathname === '/api/me') {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
             }
