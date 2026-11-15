@@ -1,7 +1,11 @@
 'use strict';
 
-const { handleCommunityMaps } = require('./community-maps');
-const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
+// Módulos opcionales: si faltan o fallan, cuentas y perfil siguen funcionando (solo se pierden mapas/grupos/party).
+let handleCommunityMaps = async () => false;
+let handleSocial = async () => false;
+let SOCIAL_SCHEMA_SQL = '';
+try { ({ handleCommunityMaps } = require('./community-maps')); } catch (error) { console.error('No se pudo cargar community-maps.js:', error.message); }
+try { ({ handleSocial, SOCIAL_SCHEMA_SQL } = require('./social')); } catch (error) { console.error('No se pudo cargar social.js:', error.message); }
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -284,8 +288,12 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
-        await pool.query(SOCIAL_SCHEMA_SQL);
+        // Las tablas de cuentas ya están listas: login y perfil no deben depender de grupos/party/apuestas.
         schemaReady = true;
+        if (SOCIAL_SCHEMA_SQL) {
+            try { await pool.query(SOCIAL_SCHEMA_SQL); }
+            catch (error) { console.error('No se pudo preparar el esquema social (grupos/party):', error.message); }
+        }
     }
 
     function limited(request, response) {
