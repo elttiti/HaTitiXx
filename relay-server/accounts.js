@@ -1,7 +1,6 @@
 'use strict';
 
 const { handleCommunityMaps } = require('./community-maps');
-const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -149,6 +148,331 @@ function ipKey(request) {
     return String(request.socket?.remoteAddress || 'unknown').slice(0, 80);
 }
 
+const SOCIAL_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS hatitix_groups (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS hatitix_group_members (
+    group_id UUID NOT NULL REFERENCES hatitix_groups(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (group_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_group_members_account_idx ON hatitix_group_members(account_id);
+CREATE TABLE IF NOT EXISTS hatitix_group_messages (
+    id BIGSERIAL PRIMARY KEY,
+    group_id UUID NOT NULL REFERENCES hatitix_groups(id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
+    sender_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS hatitix_group_messages_group_idx ON hatitix_group_messages(group_id, id);
+
+CREATE TABLE IF NOT EXISTS hatitix_parties (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    leader_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    room_id TEXT,
+    room_link TEXT,
+    room_seq INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS hatitix_party_members (
+    party_id UUID NOT NULL REFERENCES hatitix_parties(id) ON DELETE CASCADE,
+    account_id UUID PRIMARY KEY REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS hatitix_party_members_party_idx ON hatitix_party_members(party_id);
+CREATE TABLE IF NOT EXISTS hatitix_party_invites (
+    id UUID PRIMARY KEY,
+    party_id UUID NOT NULL REFERENCES hatitix_parties(id) ON DELETE CASCADE,
+    from_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    to_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (party_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_party_invites_to_idx ON hatitix_party_invites(to_id);
+
+`;
+
+function socialCleanText(value, max, fallback = '') {
+    const text = String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+    return text || fallback;
+}
+function uniqueIds(list, max) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const item of list) {
+        const id = String(item || '').toLowerCase();
+        if (UUID_RE.test(id) && !out.includes(id)) out.push(id);
+        if (out.length >= max) break;
+    }
+    return out;
+}
+async function withTx(pool, fn) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+    } catch (error) {
+        try { await client.query('ROLLBACK'); } catch (_) { /* ya cerrada */ }
+        throw error;
+    } finally { client.release(); }
+}
+
+// ------------------------------------------------------------------ GRUPOS
+async function listGroups(pool, userId, groupId = null) {
+    const params = [userId];
+    let extra = '';
+    if (groupId) { params.push(groupId); extra = 'AND g.id = $2'; }
+    const { rows } = await pool.query(`
+        SELECT g.id, g.name, g.owner_id, g.created_at,
+               COALESCE((SELECT MAX(m.id) FROM hatitix_group_messages m WHERE m.group_id = g.id), 0) AS last_message_id
+        FROM hatitix_groups g
+        JOIN hatitix_group_members me ON me.group_id = g.id AND me.account_id = $1
+        WHERE TRUE ${extra}
+        ORDER BY g.created_at DESC`, params);
+    if (!rows.length) return [];
+    const members = await pool.query(`
+        SELECT gm.group_id, a.id, a.display_name, a.tag_code
+        FROM hatitix_group_members gm JOIN hatitix_accounts a ON a.id = gm.account_id
+        WHERE gm.group_id = ANY($1::uuid[]) ORDER BY gm.joined_at`, [rows.map((row) => row.id)]);
+    return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        owner: row.owner_id === userId,
+        ownerId: row.owner_id,
+        createdAt: row.created_at,
+        lastMessageId: Number(row.last_message_id || 0),
+        members: members.rows.filter((m) => m.group_id === row.id)
+            .map((m) => ({ id: m.id, displayName: m.display_name, tag: `${m.display_name}#${m.tag_code}` }))
+    }));
+}
+async function memberOf(pool, groupId, userId) {
+    const { rowCount } = await pool.query('SELECT 1 FROM hatitix_group_members WHERE group_id = $1 AND account_id = $2', [groupId, userId]);
+    return rowCount > 0;
+}
+
+async function groupsRoutes(ctx) {
+    const { request, url, pool, user, readJson, areFriends, messageLimited, ok } = ctx;
+    const method = request.method;
+    if (url.pathname === '/api/groups') {
+        if (method === 'GET') return ok({ groups: await listGroups(pool, user.id) });
+        if (method === 'POST') {
+            const body = await readJson(request);
+            const name = socialCleanText(body.name, 40);
+            if (!name) throw new ApiError(400, 'Escribí un nombre para el grupo.');
+            const memberIds = uniqueIds(body.memberIds, MAX_GROUP_MEMBERS).filter((id) => id !== user.id);
+            if (!memberIds.length) throw new ApiError(400, 'Elegí al menos un amigo.');
+            for (const id of memberIds) {
+                if (!(await areFriends(user.id, id))) throw new ApiError(403, 'Solo podés agregar a tus amigos al grupo.');
+            }
+            const owned = await pool.query('SELECT COUNT(*)::int AS n FROM hatitix_groups WHERE owner_id = $1', [user.id]);
+            if (owned.rows[0].n >= MAX_GROUPS_OWNED) throw new ApiError(400, `Podés tener hasta ${MAX_GROUPS_OWNED} grupos propios. Eliminá alguno.`);
+            const id = crypto.randomUUID();
+            await withTx(pool, async (client) => {
+                await client.query('INSERT INTO hatitix_groups(id, name, owner_id) VALUES($1, $2, $3)', [id, name, user.id]);
+                await client.query('INSERT INTO hatitix_group_members(group_id, account_id) SELECT $1::uuid, UNNEST($2::uuid[])', [id, [user.id, ...memberIds]]);
+            });
+            const [group] = await listGroups(pool, user.id, id);
+            return ok({ group }, 201);
+        }
+        return false;
+    }
+    const match = url.pathname.match(/^\/api\/groups\/([0-9a-f-]{36})(?:\/(leave|members|messages))?$/i);
+    if (!match || !UUID_RE.test(match[1])) return false;
+    const groupId = match[1].toLowerCase(), sub = (match[2] || '').toLowerCase();
+
+    if (!sub && method === 'GET') {
+        const [group] = await listGroups(pool, user.id, groupId);
+        if (!group) throw new ApiError(404, 'Grupo no encontrado.');
+        return ok({ group });
+    }
+    if (!sub && method === 'DELETE') {
+        const result = await pool.query('DELETE FROM hatitix_groups WHERE id = $1 AND owner_id = $2', [groupId, user.id]);
+        if (result.rowCount) return ok({});
+        if (await memberOf(pool, groupId, user.id)) throw new ApiError(403, 'Solo el dueño puede eliminar el grupo. Podés salirte.');
+        throw new ApiError(404, 'Grupo no encontrado.');
+    }
+    if (sub === 'leave' && method === 'POST') {
+        const group = await pool.query('SELECT owner_id FROM hatitix_groups WHERE id = $1', [groupId]);
+        if (!group.rows[0] || !(await memberOf(pool, groupId, user.id))) throw new ApiError(404, 'Grupo no encontrado.');
+        if (group.rows[0].owner_id === user.id) throw new ApiError(400, 'Sos el dueño: eliminá el grupo en lugar de salirte.');
+        await pool.query('DELETE FROM hatitix_group_members WHERE group_id = $1 AND account_id = $2', [groupId, user.id]);
+        return ok({});
+    }
+    if (sub === 'members' && method === 'POST') {
+        const group = await pool.query('SELECT owner_id FROM hatitix_groups WHERE id = $1', [groupId]);
+        if (!group.rows[0]) throw new ApiError(404, 'Grupo no encontrado.');
+        if (group.rows[0].owner_id !== user.id) throw new ApiError(403, 'Solo el dueño puede agregar integrantes.');
+        const body = await readJson(request);
+        const ids = uniqueIds(body.memberIds, MAX_GROUP_MEMBERS);
+        for (const id of ids) if (!(await areFriends(user.id, id))) throw new ApiError(403, 'Solo podés agregar a tus amigos al grupo.');
+        const count = await pool.query('SELECT COUNT(*)::int AS n FROM hatitix_group_members WHERE group_id = $1', [groupId]);
+        if (count.rows[0].n + ids.length > MAX_GROUP_MEMBERS) throw new ApiError(400, `El grupo admite hasta ${MAX_GROUP_MEMBERS} integrantes.`);
+        if (ids.length) await pool.query('INSERT INTO hatitix_group_members(group_id, account_id) SELECT $1::uuid, UNNEST($2::uuid[]) ON CONFLICT DO NOTHING', [groupId, ids]);
+        const [updated] = await listGroups(pool, user.id, groupId);
+        return ok({ group: updated });
+    }
+    if (sub === 'messages') {
+        if (!(await memberOf(pool, groupId, user.id))) throw new ApiError(404, 'Grupo no encontrado.');
+        if (method === 'GET') {
+            const after = Math.max(0, Number.parseInt(url.searchParams.get('after') || '0', 10) || 0);
+            const { rows } = await pool.query(`
+                SELECT * FROM (
+                    SELECT id, sender_id, sender_name, body, created_at FROM hatitix_group_messages
+                    WHERE group_id = $1 AND id > $2 ORDER BY id DESC LIMIT 100
+                ) m ORDER BY id ASC`, [groupId, after]);
+            return ok({ messages: rows.map((m) => ({ id: Number(m.id), mine: m.sender_id === user.id, senderName: m.sender_name, body: m.body, createdAt: m.created_at })) });
+        }
+        if (method === 'POST') {
+            if (messageLimited(user.id)) throw new ApiError(429, 'Vas muy rápido. Esperá unos segundos.');
+            const body = await readJson(request);
+            const text = String(body.body || '').replace(/\u0000/g, '').trim();
+            if (!text || text.length > MAX_MESSAGE_CHARS) throw new ApiError(400, `El mensaje debe tener entre 1 y ${MAX_MESSAGE_CHARS} caracteres.`);
+            const senderName = socialCleanText(user.display_name || user.displayName || 'Jugador', 50, 'Jugador');
+            const inserted = await pool.query('INSERT INTO hatitix_group_messages(group_id, sender_id, sender_name, body) VALUES($1, $2, $3, $4) RETURNING id, created_at', [groupId, user.id, senderName, text]);
+            return ok({ message: { id: Number(inserted.rows[0].id), mine: true, senderName, body: text, createdAt: inserted.rows[0].created_at } }, 201);
+        }
+    }
+    return false;
+}
+
+// ------------------------------------------------------------------ PARTIES
+async function partyOf(pool, accountId) {
+    const found = await pool.query(`
+        SELECT p.* FROM hatitix_party_members pm JOIN hatitix_parties p ON p.id = pm.party_id
+        WHERE pm.account_id = $1`, [accountId]);
+    const party = found.rows[0];
+    if (!party) return null;
+    const members = await pool.query(`
+        SELECT a.id, a.display_name, a.tag_code FROM hatitix_party_members pm
+        JOIN hatitix_accounts a ON a.id = pm.account_id WHERE pm.party_id = $1 ORDER BY pm.joined_at`, [party.id]);
+    return {
+        id: party.id,
+        name: party.name,
+        leaderId: party.leader_id,
+        isLeader: party.leader_id === accountId,
+        roomId: party.room_id || '',
+        roomLink: party.room_link || '',
+        roomSeq: Number(party.room_seq || 0),
+        members: members.rows.map((m) => ({ id: m.id, displayName: m.display_name, tag: `${m.display_name}#${m.tag_code}` }))
+    };
+}
+async function leavePartyTx(client, accountId) {
+    const current = await client.query(`
+        SELECT pm.party_id, p.leader_id FROM hatitix_party_members pm
+        JOIN hatitix_parties p ON p.id = pm.party_id WHERE pm.account_id = $1 FOR UPDATE OF pm`, [accountId]);
+    if (!current.rows[0]) return;
+    const { party_id: partyId, leader_id: leaderId } = current.rows[0];
+    await client.query('DELETE FROM hatitix_party_members WHERE account_id = $1', [accountId]);
+    const rest = await client.query('SELECT account_id FROM hatitix_party_members WHERE party_id = $1 ORDER BY joined_at LIMIT 1', [partyId]);
+    if (!rest.rows[0]) await client.query('DELETE FROM hatitix_parties WHERE id = $1', [partyId]);
+    else if (leaderId === accountId) await client.query('UPDATE hatitix_parties SET leader_id = $2 WHERE id = $1', [partyId, rest.rows[0].account_id]);
+}
+
+async function partiesRoutes(ctx) {
+    const { request, url, pool, user, readJson, areFriends, ok } = ctx;
+    const method = request.method, path = url.pathname;
+
+    if (method === 'GET' && path === '/api/parties/me') {
+        const party = await partyOf(pool, user.id);
+        const invites = await pool.query(`
+            SELECT i.id, i.party_id, p.name AS party_name, a.display_name AS from_name, i.created_at
+            FROM hatitix_party_invites i
+            JOIN hatitix_parties p ON p.id = i.party_id
+            JOIN hatitix_accounts a ON a.id = i.from_id
+            WHERE i.to_id = $1 AND i.created_at > NOW() - INTERVAL '1 day'
+            ORDER BY i.created_at DESC LIMIT 20`, [user.id]);
+        return ok({ party, invites: invites.rows.map((i) => ({ id: i.id, partyId: i.party_id, partyName: i.party_name, fromName: i.from_name, createdAt: i.created_at })) });
+    }
+    if (method === 'POST' && path === '/api/parties') {
+        const body = await readJson(request);
+        const name = socialCleanText(body.name, 40, 'Mi Party');
+        const id = crypto.randomUUID();
+        await withTx(pool, async (client) => {
+            await leavePartyTx(client, user.id);
+            await client.query('INSERT INTO hatitix_parties(id, name, leader_id) VALUES($1, $2, $3)', [id, name, user.id]);
+            await client.query('INSERT INTO hatitix_party_members(party_id, account_id) VALUES($1, $2)', [id, user.id]);
+        });
+        return ok({ party: await partyOf(pool, user.id) }, 201);
+    }
+    if (method === 'POST' && path === '/api/parties/leave') {
+        await withTx(pool, (client) => leavePartyTx(client, user.id));
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/end') {
+        const party = await partyOf(pool, user.id);
+        if (!party) throw new ApiError(404, 'No estás en ningún party.');
+        if (!party.isLeader) throw new ApiError(403, 'Solo el líder puede finalizar el party.');
+        await pool.query('DELETE FROM hatitix_parties WHERE id = $1 AND leader_id = $2', [party.id, user.id]);
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/invite') {
+        const body = await readJson(request);
+        const toId = String(body.accountId || '').toLowerCase();
+        if (!UUID_RE.test(toId) || toId === user.id) throw new ApiError(400, 'Amigo inválido.');
+        const party = await partyOf(pool, user.id);
+        if (!party) throw new ApiError(400, 'Primero creá un Party.');
+        if (!(await areFriends(user.id, toId))) throw new ApiError(403, 'Solo podés invitar a tus amigos.');
+        if (party.members.some((m) => m.id === toId)) throw new ApiError(409, 'Ya está en el party.');
+        if (party.members.length >= MAX_PARTY_MEMBERS) throw new ApiError(400, `El party admite hasta ${MAX_PARTY_MEMBERS} jugadores.`);
+        await pool.query(`
+            INSERT INTO hatitix_party_invites(id, party_id, from_id, to_id) VALUES($1, $2, $3, $4)
+            ON CONFLICT (party_id, to_id) DO UPDATE SET from_id = EXCLUDED.from_id, created_at = NOW()`,
+        [crypto.randomUUID(), party.id, user.id, toId]);
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/room') {
+        const body = await readJson(request);
+        const roomId = String(body.roomId || '');
+        const link = String(body.link || '').slice(0, 300);
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId) || !/^https?:\/\//i.test(link)) throw new ApiError(400, 'Sala inválida.');
+        const party = await partyOf(pool, user.id);
+        if (!party || !party.isLeader) return ok({ updated: false });
+        const result = await pool.query(`
+            UPDATE hatitix_parties SET room_id = $3, room_link = $4, room_seq = room_seq + 1
+            WHERE id = $1 AND leader_id = $2 AND room_id IS DISTINCT FROM $3`, [party.id, user.id, roomId, link]);
+        return ok({ updated: result.rowCount > 0 });
+    }
+    const invite = path.match(/^\/api\/parties\/invites\/([0-9a-f-]{36})\/(accept|decline)$/i);
+    if (method === 'POST' && invite && UUID_RE.test(invite[1])) {
+        const inviteId = invite[1].toLowerCase(), action = invite[2].toLowerCase();
+        await withTx(pool, async (client) => {
+            const found = await client.query('SELECT * FROM hatitix_party_invites WHERE id = $1 AND to_id = $2 FOR UPDATE', [inviteId, user.id]);
+            const row = found.rows[0];
+            if (!row) throw new ApiError(404, 'La invitación ya no existe (el party pudo haber finalizado).');
+            if (action === 'decline') { await client.query('DELETE FROM hatitix_party_invites WHERE id = $1', [inviteId]); return; }
+            const count = await client.query('SELECT COUNT(*)::int AS n FROM hatitix_party_members WHERE party_id = $1', [row.party_id]);
+            const already = await client.query('SELECT 1 FROM hatitix_party_members WHERE party_id = $1 AND account_id = $2', [row.party_id, user.id]);
+            if (!already.rowCount) {
+                if (count.rows[0].n >= MAX_PARTY_MEMBERS) throw new ApiError(400, 'El party está lleno.');
+                await leavePartyTx(client, user.id);
+                await client.query('INSERT INTO hatitix_party_members(party_id, account_id) VALUES($1, $2)', [row.party_id, user.id]);
+            }
+            await client.query('DELETE FROM hatitix_party_invites WHERE id = $1', [inviteId]);
+        });
+        return ok({ party: await partyOf(pool, user.id) });
+    }
+    return false;
+}
+
+
+async function handleSocialRoutes(ctx) {
+    const path = ctx.url.pathname;
+    const reply = (payload, status = 200) => { ctx.json(ctx.response, status, { ok: true, ...payload }); return true; };
+    const full = { ...ctx, ok: reply };
+    if (path === '/api/groups' || path.startsWith('/api/groups/')) return (await groupsRoutes(full)) === true;
+    if (path === '/api/parties' || path.startsWith('/api/parties/')) return (await partiesRoutes(full)) === true;
+    return false;
+}
+
 function createAccountApi(pool) {
     const authAttempts = new Map();
     const messageBuckets = new Map();
@@ -279,9 +603,10 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
-        // Tablas persistentes de grupos y Parties. Se ejecuta después de crear hatitix_accounts.
-        await pool.query(SOCIAL_SCHEMA_SQL);
+        // La base principal queda disponible aunque una tabla social ya exista o falle su migración.
         schemaReady = true;
+        try { await pool.query(SOCIAL_TABLES_SQL); }
+        catch (error) { console.error('No se pudieron crear las tablas de grupos/Parties:', error.message); }
     }
 
     function limited(request, response) {
@@ -406,7 +731,7 @@ function createAccountApi(pool) {
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
             if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
-            if (await handleSocial({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
+            if (await handleSocialRoutes({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
             if (request.method === 'GET' && url.pathname === '/api/news') {
                 json(response, 200, { ok: true, news: [
                     { id: 1, title: '¡Bienvenidos a HaTitix!', date: '2026-11-14', content: 'Ya está disponible la Workshop de mapas comunitarios.' },
