@@ -14,7 +14,7 @@ const MAX_BANNER_CHARS = 4200000;
 const MAX_AVATAR_CHARS = 150000;
 const MAX_MESSAGE_CHARS = 500;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
-const RATE_LIMIT = 12;
+const RATE_LIMIT = 30;
 
 function accountTagKey(value) {
     return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
@@ -145,7 +145,12 @@ function hashToken(token) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }
 function ipKey(request) {
-    // No confiar en X-Forwarded-For salvo que Render haya configurado el proxy delante del proceso.
+    // En Render todas las peticiones llegan desde el proxy: sin leer X-Forwarded-For todos los usuarios
+    // compartirían el mismo contador y el límite de intentos bloquearía el login de todo el mundo.
+    if (process.env.RENDER || process.env.TRUST_PROXY === '1') {
+        const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim();
+        if (forwarded) return forwarded.slice(0, 80);
+    }
     return String(request.socket?.remoteAddress || 'unknown').slice(0, 80);
 }
 
