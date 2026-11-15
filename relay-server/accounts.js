@@ -200,7 +200,7 @@ function createAccountApi(pool) {
     }
     let schemaReady = false;
 
-    async function initialize() {
+    async function runSchema() {
         await pool.query(`
             CREATE TABLE IF NOT EXISTS hatitix_accounts (
                 id UUID PRIMARY KEY,
@@ -296,6 +296,20 @@ function createAccountApi(pool) {
         }
     }
 
+    // Reintenta solo: si la base (Neon) estaba dormida o falló al arrancar, la siguiente petición vuelve a intentarlo.
+    let schemaPromise = null, schemaError = '';
+    function initialize() {
+        if (schemaReady) return Promise.resolve();
+        if (!schemaPromise) {
+            schemaPromise = runSchema().then(() => { schemaError = ''; }).catch((error) => {
+                schemaError = String(error.code || error.message || error).slice(0, 160);
+                console.error('No se pudo preparar la base de cuentas:', error.message);
+                throw error;
+            }).finally(() => { schemaPromise = null; });
+        }
+        return schemaPromise;
+    }
+
     function limited(request, response) {
         const key = ipKey(request), now = Date.now();
         let entry = authAttempts.get(key);
@@ -360,8 +374,9 @@ function createAccountApi(pool) {
             });
             response.end(); return true;
         }
+        if (!schemaReady) await initialize().catch(() => {});
         if (!schemaReady) {
-            json(response, 503, { ok: false, error: 'database_unavailable', message: 'La base de cuentas todavía no está lista.' });
+            json(response, 503, { ok: false, error: 'database_unavailable', message: 'La base de cuentas todavía no está lista.' + (schemaError ? ` (${schemaError})` : '') });
             return true;
         }
         try {
