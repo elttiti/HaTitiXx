@@ -28,7 +28,8 @@ function loadLocalEnvFile() {
 }
 loadLocalEnvFile();
 
-const HOST = process.env.HOST || '127.0.0.1';
+// Render necesita que el proceso escuche en 0.0.0.0; en Windows local se mantiene 127.0.0.1 (detrás de Caddy).
+const HOST = process.env.HOST || (process.env.RENDER ? '0.0.0.0' : '127.0.0.1');
 const PORT = Number(process.env.PORT || 8787);
 const RELAY_TOKEN = String(process.env.RELAY_TOKEN || '');
 const MAX_MESSAGE_BYTES = 24000;
