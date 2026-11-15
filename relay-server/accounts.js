@@ -1,11 +1,7 @@
 'use strict';
 
-// Módulos opcionales: si faltan o fallan, cuentas y perfil siguen funcionando (solo se pierden mapas/grupos/party).
-let handleCommunityMaps = async () => false;
-let handleSocial = async () => false;
-let SOCIAL_SCHEMA_SQL = '';
-try { ({ handleCommunityMaps } = require('./community-maps')); } catch (error) { console.error('No se pudo cargar community-maps.js:', error.message); }
-try { ({ handleSocial, SOCIAL_SCHEMA_SQL } = require('./social')); } catch (error) { console.error('No se pudo cargar social.js:', error.message); }
+const { handleCommunityMaps } = require('./community-maps');
+const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -18,7 +14,7 @@ const MAX_BANNER_CHARS = 4200000;
 const MAX_AVATAR_CHARS = 150000;
 const MAX_MESSAGE_CHARS = 500;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
-const RATE_LIMIT = 30;
+const RATE_LIMIT = 12;
 
 function accountTagKey(value) {
     return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
@@ -149,12 +145,7 @@ function hashToken(token) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }
 function ipKey(request) {
-    // En Render todas las peticiones llegan desde el proxy: sin leer X-Forwarded-For todos los usuarios
-    // compartirían el mismo contador y el límite de intentos bloquearía el login de todo el mundo.
-    if (process.env.RENDER || process.env.TRUST_PROXY === '1') {
-        const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim();
-        if (forwarded) return forwarded.slice(0, 80);
-    }
+    // No confiar en X-Forwarded-For salvo que Render haya configurado el proxy delante del proceso.
     return String(request.socket?.remoteAddress || 'unknown').slice(0, 80);
 }
 
@@ -200,7 +191,7 @@ function createAccountApi(pool) {
     }
     let schemaReady = false;
 
-    async function runSchema() {
+    async function initialize() {
         await pool.query(`
             CREATE TABLE IF NOT EXISTS hatitix_accounts (
                 id UUID PRIMARY KEY,
@@ -288,26 +279,8 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
-        // Las tablas de cuentas ya están listas: login y perfil no deben depender de grupos/party/apuestas.
+        await pool.query(SOCIAL_SCHEMA_SQL);
         schemaReady = true;
-        if (SOCIAL_SCHEMA_SQL) {
-            try { await pool.query(SOCIAL_SCHEMA_SQL); }
-            catch (error) { console.error('No se pudo preparar el esquema social (grupos/party):', error.message); }
-        }
-    }
-
-    // Reintenta solo: si la base (Neon) estaba dormida o falló al arrancar, la siguiente petición vuelve a intentarlo.
-    let schemaPromise = null, schemaError = '';
-    function initialize() {
-        if (schemaReady) return Promise.resolve();
-        if (!schemaPromise) {
-            schemaPromise = runSchema().then(() => { schemaError = ''; }).catch((error) => {
-                schemaError = String(error.code || error.message || error).slice(0, 160);
-                console.error('No se pudo preparar la base de cuentas:', error.message);
-                throw error;
-            }).finally(() => { schemaPromise = null; });
-        }
-        return schemaPromise;
     }
 
     function limited(request, response) {
@@ -374,9 +347,8 @@ function createAccountApi(pool) {
             });
             response.end(); return true;
         }
-        if (!schemaReady) await initialize().catch(() => {});
         if (!schemaReady) {
-            json(response, 503, { ok: false, error: 'database_unavailable', message: 'La base de cuentas todavía no está lista.' + (schemaError ? ` (${schemaError})` : '') });
+            json(response, 503, { ok: false, error: 'database_unavailable', message: 'La base de cuentas todavía no está lista.' });
             return true;
         }
         try {
