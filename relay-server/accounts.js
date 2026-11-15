@@ -1,6 +1,7 @@
 'use strict';
 
 const { handleCommunityMaps } = require('./community-maps');
+const { handleSocial, SOCIAL_SCHEMA_SQL } = require('./social');
 
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
@@ -97,7 +98,8 @@ function safeUser(row) {
         grants: grants.filter((g) => g === 'owner' || g === 'betatester'),
         crownOn,
         crown: grants.includes('owner') && crownOn,
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        points: Number(row.points || 0)
     };
 }
 function json(response, status, payload) {
@@ -210,6 +212,7 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS grants TEXT[] NOT NULL DEFAULT '{}';
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS crown_on BOOLEAN NOT NULL DEFAULT TRUE;
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS points INTEGER NOT NULL DEFAULT 0;
             CREATE TABLE IF NOT EXISTS hatitix_sessions (
                 token_hash CHAR(64) PRIMARY KEY,
                 account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
@@ -266,10 +269,17 @@ function createAccountApi(pool) {
                 rival_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
                 amount INTEGER NOT NULL CHECK (amount > 0),
                 status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'settled', 'cancelled')),
+                challenger_team TEXT NOT NULL DEFAULT 'red' CHECK (challenger_team IN ('red', 'blue')),
+                winner_team TEXT,
+                settled_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS challenger_team TEXT NOT NULL DEFAULT 'red';
+            ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS winner_team TEXT;
+            ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
+        await pool.query(SOCIAL_SCHEMA_SQL);
         schemaReady = true;
     }
 
@@ -395,27 +405,13 @@ function createAccountApi(pool) {
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
             if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
+            if (await handleSocial({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
             if (request.method === 'GET' && url.pathname === '/api/news') {
                 json(response, 200, { ok: true, news: [
                     { id: 1, title: '¡Bienvenidos a HaTitix!', date: '2026-11-14', content: 'Ya está disponible la Workshop de mapas comunitarios.' },
                     { id: 2, title: 'Torneo de fin de semana', date: '2026-11-14', content: 'Prepárate para los próximos partidos de Futsal.' }
                 ] }); return true;
             }
-            if (request.method === 'POST' && url.pathname === '/api/bet/create') {
-                const body = await readJson(request);
-                const amount = Number(body.amount);
-                const roomId = String(body.roomId || '').trim();
-                const rivalId = String(body.rivalId || '').trim();
-                if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1000000) return json(response, 400, { ok: false, message: 'El monto debe ser un número entero entre 1 y 1.000.000.' }), true;
-                if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId)) return json(response, 400, { ok: false, message: 'Sala inválida.' }), true;
-                if (rivalId && !UUID_RE.test(rivalId)) return json(response, 400, { ok: false, message: 'Rival inválido.' }), true;
-                const result = await pool.query(
-                    'INSERT INTO hatitix_bets(id, room_id, challenger_id, rival_id, amount) VALUES($1,$2,$3,$4,$5) RETURNING id, status, created_at',
-                    [crypto.randomUUID(), roomId, user.id, rivalId || null, amount]
-                );
-                json(response, 201, { ok: true, message: 'Apuesta creada. Esperando al rival.', bet: result.rows[0] }); return true;
-            }
-
             if (request.method === 'GET' && url.pathname === '/api/me') {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
             }
