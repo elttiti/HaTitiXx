@@ -446,6 +446,13 @@ async function partiesRoutes(ctx) {
     }
     if (method === 'POST' && path === '/api/parties/room') {
         const body = await readJson(request);
+        if (body.clear === true) {
+            // El líder salió de su sala: se borra la sala del party para que los miembros salgan también.
+            const current = await partyOf(pool, user.id);
+            if (!current || !current.isLeader) return ok({ updated: false });
+            const cleared = await pool.query('UPDATE hatitix_parties SET room_id = NULL, room_link = NULL, room_seq = room_seq + 1 WHERE id = $1 AND leader_id = $2 AND room_id IS NOT NULL', [current.id, user.id]);
+            return ok({ updated: cleared.rowCount > 0 });
+        }
         const roomId = String(body.roomId || '');
         const link = String(body.link || '').slice(0, 300);
         if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId) || !/^https?:\/\//i.test(link)) throw new ApiError(400, 'Sala inválida.');
