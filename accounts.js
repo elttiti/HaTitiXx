@@ -1,5 +1,7 @@
 'use strict';
 
+const { handleCommunityMaps } = require('./community-maps');
+
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const scrypt = promisify(crypto.scrypt);
@@ -12,6 +14,12 @@ const MAX_AVATAR_CHARS = 150000;
 const MAX_MESSAGE_CHARS = 500;
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMIT = 12;
+const MAX_GROUP_MEMBERS = 30;
+const MAX_GROUPS_OWNED = 10;
+const MAX_PARTY_MEMBERS = 8;
+class ApiError extends Error {
+    constructor(status, message) { super(message); this.name = 'ApiError'; this.status = status; }
+}
 
 function accountTagKey(value) {
     return String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
@@ -30,6 +38,11 @@ const SPECIAL_CODES = Object.freeze({
     '014c98a46aaa02817caf27690482bfe60a63f7d39ebaba334c97cc9c3ffcbeda': Object.freeze({
         grant: 'owner', points: 0,
         message: 'Código de dueño aceptado: desbloqueaste la corona 👑 y el pin OWNER.'
+    }),
+    '04a3d3c7794f380848a024838b40b52596717170ab8e6eada048a6b45ca55645': Object.freeze({
+        grant: 'titi-id', points: 0,
+        fixedTag: Object.freeze({ displayName: 'Titi', tagCode: '0000' }),
+        message: 'Código aceptado: tu identificador de jugador ahora es Titi#0000.'
     })
 });
 // Pines que solo se obtienen con un código (el servidor fija su aspecto; el cliente no puede inventarlos).
@@ -80,7 +93,7 @@ function validatePins(input, grants) {
     return { pins: out };
 }
 function safeUser(row) {
-    const grants = Array.isArray(row.grants) ? row.grants : [];
+    const grants = Array.isArray(row.grants) ? row.grants : parsePins(row.grants || '[]');
     const crownOn = row.crown_on !== false;
     return {
         id: row.id,
@@ -143,6 +156,620 @@ function hashToken(token) {
 function ipKey(request) {
     // No confiar en X-Forwarded-For salvo que Render haya configurado el proxy delante del proceso.
     return String(request.socket?.remoteAddress || 'unknown').slice(0, 80);
+}
+
+const SOCIAL_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS hatitix_groups (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS hatitix_group_members (
+    group_id UUID NOT NULL REFERENCES hatitix_groups(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (group_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_group_members_account_idx ON hatitix_group_members(account_id);
+CREATE TABLE IF NOT EXISTS hatitix_group_messages (
+    id BIGSERIAL PRIMARY KEY,
+    group_id UUID NOT NULL REFERENCES hatitix_groups(id) ON DELETE CASCADE,
+    sender_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
+    sender_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS hatitix_group_messages_group_idx ON hatitix_group_messages(group_id, id);
+
+CREATE TABLE IF NOT EXISTS hatitix_parties (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    leader_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    room_id TEXT,
+    room_link TEXT,
+    room_seq INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS hatitix_party_members (
+    party_id UUID NOT NULL REFERENCES hatitix_parties(id) ON DELETE CASCADE,
+    account_id UUID PRIMARY KEY REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS hatitix_party_members_party_idx ON hatitix_party_members(party_id);
+CREATE TABLE IF NOT EXISTS hatitix_party_invites (
+    id UUID PRIMARY KEY,
+    party_id UUID NOT NULL REFERENCES hatitix_parties(id) ON DELETE CASCADE,
+    from_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    to_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (party_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_party_invites_to_idx ON hatitix_party_invites(to_id);
+
+`;
+
+function socialCleanText(value, max, fallback = '') {
+    const text = String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+    return text || fallback;
+}
+function uniqueIds(list, max) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const item of list) {
+        const id = String(item || '').toLowerCase();
+        if (UUID_RE.test(id) && !out.includes(id)) out.push(id);
+        if (out.length >= max) break;
+    }
+    return out;
+}
+async function withTx(pool, fn) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const result = await fn(client);
+        await client.query('COMMIT');
+        return result;
+    } catch (error) {
+        try { await client.query('ROLLBACK'); } catch (_) { /* ya cerrada */ }
+        throw error;
+    } finally { client.release(); }
+}
+
+// ------------------------------------------------------------------ GRUPOS
+async function listGroups(pool, userId, groupId = null) {
+    const params = [userId];
+    let extra = '';
+    if (groupId) { params.push(groupId); extra = 'AND g.id = $2'; }
+    const { rows } = await pool.query(`
+        SELECT g.id, g.name, g.owner_id, g.created_at,
+               COALESCE((SELECT MAX(m.id) FROM hatitix_group_messages m WHERE m.group_id = g.id), 0) AS last_message_id
+        FROM hatitix_groups g
+        JOIN hatitix_group_members me ON me.group_id = g.id AND me.account_id = $1
+        WHERE TRUE ${extra}
+        ORDER BY g.created_at DESC`, params);
+    if (!rows.length) return [];
+    const groupIds = rows.map((row) => row.id);
+    const members = await pool.query(`
+        SELECT gm.group_id, a.id, a.display_name, a.tag_code
+        FROM hatitix_group_members gm JOIN hatitix_accounts a ON a.id = gm.account_id
+        WHERE gm.group_id IN (${groupIds.map((_, index) => `$${index + 1}`).join(', ')}) ORDER BY gm.joined_at`, groupIds);
+    return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        owner: row.owner_id === userId,
+        ownerId: row.owner_id,
+        createdAt: row.created_at,
+        lastMessageId: Number(row.last_message_id || 0),
+        members: members.rows.filter((m) => m.group_id === row.id)
+            .map((m) => ({ id: m.id, displayName: m.display_name, tag: `${m.display_name}#${m.tag_code}` }))
+    }));
+}
+async function memberOf(pool, groupId, userId) {
+    const { rowCount } = await pool.query('SELECT 1 FROM hatitix_group_members WHERE group_id = $1 AND account_id = $2', [groupId, userId]);
+    return rowCount > 0;
+}
+
+async function groupsRoutes(ctx) {
+    const { request, url, pool, user, readJson, areFriends, messageLimited, ok } = ctx;
+    const method = request.method;
+    if (url.pathname === '/api/groups') {
+        if (method === 'GET') return ok({ groups: await listGroups(pool, user.id) });
+        if (method === 'POST') {
+            const body = await readJson(request);
+            const name = socialCleanText(body.name, 40);
+            if (!name) throw new ApiError(400, 'Escribí un nombre para el grupo.');
+            const memberIds = uniqueIds(body.memberIds, MAX_GROUP_MEMBERS).filter((id) => id !== user.id);
+            if (!memberIds.length) throw new ApiError(400, 'Elegí al menos un amigo.');
+            for (const id of memberIds) {
+                if (!(await areFriends(user.id, id))) throw new ApiError(403, 'Solo podés agregar a tus amigos al grupo.');
+            }
+            const owned = await pool.query('SELECT COUNT(*)::int AS n FROM hatitix_groups WHERE owner_id = $1', [user.id]);
+            if (owned.rows[0].n >= MAX_GROUPS_OWNED) throw new ApiError(400, `Podés tener hasta ${MAX_GROUPS_OWNED} grupos propios. Eliminá alguno.`);
+            const id = crypto.randomUUID();
+            await withTx(pool, async (client) => {
+                await client.query('INSERT INTO hatitix_groups(id, name, owner_id) VALUES($1, $2, $3)', [id, name, user.id]);
+                for (const accountId of [user.id, ...memberIds]) {
+                    await client.query('INSERT INTO hatitix_group_members(group_id, account_id) VALUES($1, $2)', [id, accountId]);
+                }
+            });
+            const [group] = await listGroups(pool, user.id, id);
+            return ok({ group }, 201);
+        }
+        return false;
+    }
+    const match = url.pathname.match(/^\/api\/groups\/([0-9a-f-]{36})(?:\/(leave|members|messages))?$/i);
+    if (!match || !UUID_RE.test(match[1])) return false;
+    const groupId = match[1].toLowerCase(), sub = (match[2] || '').toLowerCase();
+
+    if (!sub && method === 'GET') {
+        const [group] = await listGroups(pool, user.id, groupId);
+        if (!group) throw new ApiError(404, 'Grupo no encontrado.');
+        return ok({ group });
+    }
+    if (!sub && method === 'DELETE') {
+        const result = await pool.query('DELETE FROM hatitix_groups WHERE id = $1 AND owner_id = $2', [groupId, user.id]);
+        if (result.rowCount) return ok({});
+        if (await memberOf(pool, groupId, user.id)) throw new ApiError(403, 'Solo el dueño puede eliminar el grupo. Podés salirte.');
+        throw new ApiError(404, 'Grupo no encontrado.');
+    }
+    if (sub === 'leave' && method === 'POST') {
+        const group = await pool.query('SELECT owner_id FROM hatitix_groups WHERE id = $1', [groupId]);
+        if (!group.rows[0] || !(await memberOf(pool, groupId, user.id))) throw new ApiError(404, 'Grupo no encontrado.');
+        if (group.rows[0].owner_id === user.id) throw new ApiError(400, 'Sos el dueño: eliminá el grupo en lugar de salirte.');
+        await pool.query('DELETE FROM hatitix_group_members WHERE group_id = $1 AND account_id = $2', [groupId, user.id]);
+        return ok({});
+    }
+    if (sub === 'members' && method === 'POST') {
+        const group = await pool.query('SELECT owner_id FROM hatitix_groups WHERE id = $1', [groupId]);
+        if (!group.rows[0]) throw new ApiError(404, 'Grupo no encontrado.');
+        if (group.rows[0].owner_id !== user.id) throw new ApiError(403, 'Solo el dueño puede agregar integrantes.');
+        const body = await readJson(request);
+        const ids = uniqueIds(body.memberIds, MAX_GROUP_MEMBERS);
+        for (const id of ids) if (!(await areFriends(user.id, id))) throw new ApiError(403, 'Solo podés agregar a tus amigos al grupo.');
+        const count = await pool.query('SELECT COUNT(*)::int AS n FROM hatitix_group_members WHERE group_id = $1', [groupId]);
+        if (count.rows[0].n + ids.length > MAX_GROUP_MEMBERS) throw new ApiError(400, `El grupo admite hasta ${MAX_GROUP_MEMBERS} integrantes.`);
+        for (const accountId of ids) {
+            await pool.query('INSERT INTO hatitix_group_members(group_id, account_id) VALUES($1, $2) ON CONFLICT DO NOTHING', [groupId, accountId]);
+        }
+        const [updated] = await listGroups(pool, user.id, groupId);
+        return ok({ group: updated });
+    }
+    if (sub === 'messages') {
+        if (!(await memberOf(pool, groupId, user.id))) throw new ApiError(404, 'Grupo no encontrado.');
+        if (method === 'GET') {
+            const after = Math.max(0, Number.parseInt(url.searchParams.get('after') || '0', 10) || 0);
+            const { rows } = await pool.query(`
+                SELECT * FROM (
+                    SELECT id, sender_id, sender_name, body, created_at FROM hatitix_group_messages
+                    WHERE group_id = $1 AND id > $2 ORDER BY id DESC LIMIT 100
+                ) m ORDER BY id ASC`, [groupId, after]);
+            return ok({ messages: rows.map((m) => ({ id: Number(m.id), mine: m.sender_id === user.id, senderName: m.sender_name, body: m.body, createdAt: m.created_at })) });
+        }
+        if (method === 'POST') {
+            if (messageLimited(user.id)) throw new ApiError(429, 'Vas muy rápido. Esperá unos segundos.');
+            const body = await readJson(request);
+            const text = String(body.body || '').replace(/\u0000/g, '').trim();
+            if (!text || text.length > MAX_MESSAGE_CHARS) throw new ApiError(400, `El mensaje debe tener entre 1 y ${MAX_MESSAGE_CHARS} caracteres.`);
+            const senderName = socialCleanText(user.display_name || user.displayName || 'Jugador', 50, 'Jugador');
+            const inserted = await pool.query('INSERT INTO hatitix_group_messages(group_id, sender_id, sender_name, body) VALUES($1, $2, $3, $4) RETURNING id, created_at', [groupId, user.id, senderName, text]);
+            return ok({ message: { id: Number(inserted.rows[0].id), mine: true, senderName, body: text, createdAt: inserted.rows[0].created_at } }, 201);
+        }
+    }
+    return false;
+}
+
+// ------------------------------------------------------------------ PARTIES
+async function partyOf(pool, accountId) {
+    const found = await pool.query(`
+        SELECT p.* FROM hatitix_party_members pm JOIN hatitix_parties p ON p.id = pm.party_id
+        WHERE pm.account_id = $1`, [accountId]);
+    const party = found.rows[0];
+    if (!party) return null;
+    const members = await pool.query(`
+        SELECT a.id, a.display_name, a.tag_code FROM hatitix_party_members pm
+        JOIN hatitix_accounts a ON a.id = pm.account_id WHERE pm.party_id = $1 ORDER BY pm.joined_at`, [party.id]);
+    return {
+        id: party.id,
+        name: party.name,
+        leaderId: party.leader_id,
+        isLeader: party.leader_id === accountId,
+        roomId: party.room_id || '',
+        roomLink: party.room_link || '',
+        roomSeq: Number(party.room_seq || 0),
+        members: members.rows.map((m) => ({ id: m.id, displayName: m.display_name, tag: `${m.display_name}#${m.tag_code}` }))
+    };
+}
+async function leavePartyTx(client, accountId) {
+    const current = await client.query(`
+        SELECT pm.party_id, p.leader_id FROM hatitix_party_members pm
+        JOIN hatitix_parties p ON p.id = pm.party_id WHERE pm.account_id = $1`, [accountId]);
+    if (!current.rows[0]) return;
+    const { party_id: partyId, leader_id: leaderId } = current.rows[0];
+    await client.query('DELETE FROM hatitix_party_members WHERE account_id = $1', [accountId]);
+    const rest = await client.query('SELECT account_id FROM hatitix_party_members WHERE party_id = $1 ORDER BY joined_at LIMIT 1', [partyId]);
+    if (!rest.rows[0]) await client.query('DELETE FROM hatitix_parties WHERE id = $1', [partyId]);
+    else if (leaderId === accountId) await client.query('UPDATE hatitix_parties SET leader_id = $2 WHERE id = $1', [partyId, rest.rows[0].account_id]);
+}
+
+async function partiesRoutes(ctx) {
+    const { request, url, pool, user, readJson, areFriends, ok } = ctx;
+    const method = request.method, path = url.pathname;
+
+    if (method === 'GET' && path === '/api/parties/me') {
+        const party = await partyOf(pool, user.id);
+        const invites = await pool.query(`
+            SELECT i.id, i.party_id, p.name AS party_name, a.display_name AS from_name, i.created_at
+            FROM hatitix_party_invites i
+            JOIN hatitix_parties p ON p.id = i.party_id
+            JOIN hatitix_accounts a ON a.id = i.from_id
+            WHERE i.to_id = $1 AND i.created_at > NOW() - INTERVAL '1 day'
+            ORDER BY i.created_at DESC LIMIT 20`, [user.id]);
+        return ok({ party, invites: invites.rows.map((i) => ({ id: i.id, partyId: i.party_id, partyName: i.party_name, fromName: i.from_name, createdAt: i.created_at })) });
+    }
+    if (method === 'POST' && path === '/api/parties') {
+        const body = await readJson(request);
+        const name = socialCleanText(body.name, 40, 'Mi Party');
+        const id = crypto.randomUUID();
+        await withTx(pool, async (client) => {
+            await leavePartyTx(client, user.id);
+            await client.query('INSERT INTO hatitix_parties(id, name, leader_id) VALUES($1, $2, $3)', [id, name, user.id]);
+            await client.query('INSERT INTO hatitix_party_members(party_id, account_id) VALUES($1, $2)', [id, user.id]);
+        });
+        return ok({ party: await partyOf(pool, user.id) }, 201);
+    }
+    if (method === 'POST' && path === '/api/parties/leave') {
+        await withTx(pool, (client) => leavePartyTx(client, user.id));
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/end') {
+        const party = await partyOf(pool, user.id);
+        if (!party) throw new ApiError(404, 'No estás en ningún party.');
+        if (!party.isLeader) throw new ApiError(403, 'Solo el líder puede finalizar el party.');
+        await pool.query('DELETE FROM hatitix_parties WHERE id = $1 AND leader_id = $2', [party.id, user.id]);
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/invite') {
+        const body = await readJson(request);
+        const toId = String(body.accountId || '').toLowerCase();
+        if (!UUID_RE.test(toId) || toId === user.id) throw new ApiError(400, 'Amigo inválido.');
+        const party = await partyOf(pool, user.id);
+        if (!party) throw new ApiError(400, 'Primero creá un Party.');
+        if (!(await areFriends(user.id, toId))) throw new ApiError(403, 'Solo podés invitar a tus amigos.');
+        if (party.members.some((m) => m.id === toId)) throw new ApiError(409, 'Ya está en el party.');
+        if (party.members.length >= MAX_PARTY_MEMBERS) throw new ApiError(400, `El party admite hasta ${MAX_PARTY_MEMBERS} jugadores.`);
+        await pool.query(`
+            INSERT INTO hatitix_party_invites(id, party_id, from_id, to_id) VALUES($1, $2, $3, $4)
+            ON CONFLICT (party_id, to_id) DO UPDATE SET from_id = EXCLUDED.from_id, created_at = NOW()`,
+        [crypto.randomUUID(), party.id, user.id, toId]);
+        return ok({});
+    }
+    if (method === 'POST' && path === '/api/parties/room') {
+        const body = await readJson(request);
+        if (body.clear === true) {
+            // El líder salió de su sala: se borra la sala del party para que los miembros salgan también.
+            const current = await partyOf(pool, user.id);
+            if (!current || !current.isLeader) return ok({ updated: false });
+            const cleared = await pool.query('UPDATE hatitix_parties SET room_id = NULL, room_link = NULL, room_seq = room_seq + 1 WHERE id = $1 AND leader_id = $2 AND room_id IS NOT NULL', [current.id, user.id]);
+            return ok({ updated: cleared.rowCount > 0 });
+        }
+        const roomId = String(body.roomId || '');
+        const link = String(body.link || '').slice(0, 300);
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId) || !/^https?:\/\//i.test(link)) throw new ApiError(400, 'Sala inválida.');
+        const party = await partyOf(pool, user.id);
+        if (!party || !party.isLeader) return ok({ updated: false });
+        const result = await pool.query(`
+            UPDATE hatitix_parties SET room_id = $3, room_link = $4, room_seq = room_seq + 1
+            WHERE id = $1 AND leader_id = $2 AND (room_id IS NULL OR room_id <> $3)`, [party.id, user.id, roomId, link]);
+        return ok({ updated: result.rowCount > 0 });
+    }
+    const invite = path.match(/^\/api\/parties\/invites\/([0-9a-f-]{36})\/(accept|decline)$/i);
+    if (method === 'POST' && invite && UUID_RE.test(invite[1])) {
+        const inviteId = invite[1].toLowerCase(), action = invite[2].toLowerCase();
+        await withTx(pool, async (client) => {
+            const found = await client.query('SELECT * FROM hatitix_party_invites WHERE id = $1 AND to_id = $2 FOR UPDATE', [inviteId, user.id]);
+            const row = found.rows[0];
+            if (!row) throw new ApiError(404, 'La invitación ya no existe (el party pudo haber finalizado).');
+            if (action === 'decline') { await client.query('DELETE FROM hatitix_party_invites WHERE id = $1', [inviteId]); return; }
+            const count = await client.query('SELECT COUNT(*)::int AS n FROM hatitix_party_members WHERE party_id = $1', [row.party_id]);
+            const already = await client.query('SELECT 1 FROM hatitix_party_members WHERE party_id = $1 AND account_id = $2', [row.party_id, user.id]);
+            if (!already.rowCount) {
+                if (count.rows[0].n >= MAX_PARTY_MEMBERS) throw new ApiError(400, 'El party está lleno.');
+                await leavePartyTx(client, user.id);
+                await client.query('INSERT INTO hatitix_party_members(party_id, account_id) VALUES($1, $2)', [row.party_id, user.id]);
+            }
+            await client.query('DELETE FROM hatitix_party_invites WHERE id = $1', [inviteId]);
+        });
+        return ok({ party: await partyOf(pool, user.id) });
+    }
+    return false;
+}
+
+
+async function handleSocialRoutes(ctx) {
+    const path = ctx.url.pathname;
+    const reply = (payload, status = 200) => { ctx.json(ctx.response, status, { ok: true, ...payload }); return true; };
+    const full = { ...ctx, ok: reply };
+    if (path === '/api/groups' || path.startsWith('/api/groups/')) return (await groupsRoutes(full)) === true;
+    if (path === '/api/parties' || path.startsWith('/api/parties/')) return (await partiesRoutes(full)) === true;
+    return false;
+}
+
+// ------------------------------------------------------------------ APUESTAS 1v1
+// Flujo: desafío (pending) → el rival acepta → el retador crea una sala privada (clave) y sube el enlace →
+// se invita a amigos conectados a mirar → los espectadores apuestan rojo/azul antes del saque →
+// ambos jugadores informan el ganador; si coinciden se liquida, si no se anula (nadie gana ni pierde).
+const BET_TABLES_SQL = `
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS room_link TEXT NOT NULL DEFAULT '';
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS room_password TEXT NOT NULL DEFAULT '';
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS rival_player_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS started_at TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS report_challenger TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS report_rival TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS winner_team TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS forfeit_at TEXT;
+CREATE TABLE IF NOT EXISTS hatitix_bet_wagers (
+    id UUID PRIMARY KEY,
+    bet_id UUID NOT NULL REFERENCES hatitix_bets(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'spectator',
+    team TEXT NOT NULL CHECK (team IN ('red', 'blue')),
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    claimed INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (bet_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_bet_wagers_account_idx ON hatitix_bet_wagers(account_id);
+CREATE TABLE IF NOT EXISTS hatitix_bet_spectators (
+    bet_id UUID NOT NULL REFERENCES hatitix_bets(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'invited',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (bet_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS hatitix_bet_spectators_account_idx ON hatitix_bet_spectators(account_id);
+`;
+const BET_MAX_POINTS = 1000;
+const BET_WITH_NAMES_SQL = `
+    SELECT b.*, c.display_name AS c_name, c.tag_code AS c_code, r.display_name AS r_name, r.tag_code AS r_code
+    FROM hatitix_bets b
+    JOIN hatitix_accounts c ON c.id = b.challenger_id
+    JOIN hatitix_accounts r ON r.id = b.rival_id`;
+
+async function handleBetRoutes(ctx) {
+    const { request, url, response, pool, user, json, readJson, areFriends, presenceOf } = ctx;
+    const method = request.method, path = url.pathname;
+    if (path !== '/api/bet/create' && !path.startsWith('/api/bets/')) return false;
+    const reply = (payload, status = 200) => { json(response, status, { ok: true, ...payload }); return true; };
+    const betPoints = (value, label = 'El monto') => {
+        const amount = Number(value);
+        if (!Number.isSafeInteger(amount) || amount < 1 || amount > BET_MAX_POINTS) throw new ApiError(400, `${label} debe ser un número entero entre 1 y ${BET_MAX_POINTS}.`);
+        return amount;
+    };
+    const loadBet = async (id) => (await pool.query(`${BET_WITH_NAMES_SQL} WHERE b.id = $1`, [id])).rows[0] || null;
+    const tag = (name, code) => `${name}#${code}`;
+
+    if (method === 'POST' && path === '/api/bet/create') {
+        const body = await readJson(request);
+        const amount = betPoints(body.amount);
+        const rivalId = String(body.rivalId || '').trim().toLowerCase();
+        if (!UUID_RE.test(rivalId) || rivalId === user.id) throw new ApiError(400, 'Elegí a un amigo como rival.');
+        if (!(await areFriends(user.id, rivalId))) throw new ApiError(403, 'Solo podés desafiar a tus amigos.');
+        const busy = await pool.query(`
+            SELECT 1 FROM hatitix_bets
+            WHERE status IN ('pending', 'accepted') AND created_at > datetime('now', '-4 hours')
+              AND (challenger_id IN ($1, $2) OR rival_id IN ($1, $2)) LIMIT 1`, [user.id, rivalId]);
+        if (busy.rowCount) throw new ApiError(409, 'Tú o tu rival ya tienen una apuesta en curso. Esperen a que termine.');
+        const id = crypto.randomUUID();
+        await withTx(pool, async (client) => {
+            await client.query('INSERT INTO hatitix_bets(id, room_id, challenger_id, rival_id, amount, team) VALUES($1, $2, $3, $4, $5, $6)', [id, '', user.id, rivalId, amount, 'red']);
+            await client.query("INSERT INTO hatitix_bet_wagers(id, bet_id, account_id, role, team, amount) VALUES($1, $2, $3, 'player', 'red', $4)", [crypto.randomUUID(), id, user.id, amount]);
+            await client.query("INSERT INTO hatitix_bet_wagers(id, bet_id, account_id, role, team, amount) VALUES($1, $2, $3, 'player', 'blue', $4)", [crypto.randomUUID(), id, rivalId, amount]);
+        });
+        return reply({ message: 'Desafío enviado. Esperando que tu rival acepte.', bet: { id, status: 'pending', amount } }, 201);
+    }
+
+    if (method === 'GET' && path === '/api/bets/mine') {
+        await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE status = 'pending' AND created_at < datetime('now', '-10 minutes')");
+        await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE status = 'accepted' AND created_at < datetime('now', '-4 hours')");
+        // Abandono: si uno informó que el rival se fue y el rival no contestó en 90 s, gana quien informó.
+        await pool.query(`UPDATE hatitix_bets SET status = 'settled', winner_team = COALESCE(report_challenger, report_rival), settled_at = CURRENT_TIMESTAMP
+            WHERE status = 'accepted' AND started_at IS NOT NULL AND forfeit_at IS NOT NULL AND forfeit_at < datetime('now', '-90 seconds')
+              AND ((report_challenger IS NULL AND report_rival IS NOT NULL) OR (report_challenger IS NOT NULL AND report_rival IS NULL))`);
+        const mine = await pool.query(`${BET_WITH_NAMES_SQL}
+            WHERE (b.challenger_id = $1 OR b.rival_id = $1) AND b.status IN ('pending', 'accepted')
+            ORDER BY b.created_at DESC LIMIT 10`, [user.id]);
+        const incoming = [], outgoing = [], active = [];
+        for (const row of mine.rows) {
+            const iAmChallenger = row.challenger_id === user.id;
+            const base = { id: row.id, amount: Number(row.amount), createdAt: row.created_at };
+            if (row.status === 'pending') {
+                if (iAmChallenger) outgoing.push({ ...base, toName: row.r_name, toTag: tag(row.r_name, row.r_code) });
+                else incoming.push({ ...base, fromName: row.c_name, fromTag: tag(row.c_name, row.c_code) });
+                continue;
+            }
+            active.push({
+                ...base, role: iAmChallenger ? 'challenger' : 'rival', side: iAmChallenger ? 'red' : 'blue',
+                opponentName: iAmChallenger ? row.r_name : row.c_name, opponentId: iAmChallenger ? row.rival_id : row.challenger_id,
+                redName: row.c_name, blueName: row.r_name,
+                roomId: row.room_id || '', roomLink: row.room_link || '', roomPassword: row.room_password || '',
+                rivalPlayerName: row.rival_player_name || '', started: !!row.started_at,
+                reported: !!(iAmChallenger ? row.report_challenger : row.report_rival)
+            });
+        }
+        const watch = await pool.query(`${BET_WITH_NAMES_SQL}
+            JOIN hatitix_bet_spectators s ON s.bet_id = b.id AND s.account_id = $1
+            WHERE s.status IN ('invited', 'joined') AND b.status = 'accepted' AND b.room_link <> ''
+            ORDER BY b.created_at DESC LIMIT 10`, [user.id]);
+        const wagers = watch.rows.length
+            ? await pool.query(`SELECT bet_id, team, amount FROM hatitix_bet_wagers WHERE account_id = $1 AND bet_id IN (${watch.rows.map((_, i) => `$${i + 2}`).join(', ')})`, [user.id, ...watch.rows.map((row) => row.id)])
+            : { rows: [] };
+        const statusOf = await pool.query("SELECT bet_id, status FROM hatitix_bet_spectators WHERE account_id = $1", [user.id]);
+        const spectatorStatus = new Map(statusOf.rows.map((row) => [row.bet_id, row.status]));
+        const invites = [], spectating = [];
+        for (const row of watch.rows) {
+            const info = { id: row.id, amount: Number(row.amount), redName: row.c_name, blueName: row.r_name, started: !!row.started_at };
+            if (spectatorStatus.get(row.id) === 'invited') invites.push(info);
+            else {
+                const wager = wagers.rows.find((entry) => entry.bet_id === row.id);
+                spectating.push({ ...info, roomId: row.room_id || '', roomLink: row.room_link, roomPassword: row.room_password, myWager: wager ? { team: wager.team, amount: Number(wager.amount) } : null });
+            }
+        }
+        const results = await pool.query(`
+            SELECT w.bet_id, w.role, w.team, w.amount, b.winner_team, c.display_name AS c_name, r.display_name AS r_name
+            FROM hatitix_bet_wagers w
+            JOIN hatitix_bets b ON b.id = w.bet_id
+            JOIN hatitix_accounts c ON c.id = b.challenger_id
+            JOIN hatitix_accounts r ON r.id = b.rival_id
+            WHERE w.account_id = $1 AND w.claimed = 0 AND b.status = 'settled' LIMIT 20`, [user.id]);
+        return reply({
+            incoming, outgoing, active, invites, spectating,
+            results: results.rows.map((row) => ({ betId: row.bet_id, role: row.role, team: row.team, amount: Number(row.amount), winnerTeam: row.winner_team, won: row.team === row.winner_team, redName: row.c_name, blueName: row.r_name }))
+        });
+    }
+
+    if (method === 'POST' && path === '/api/bets/claim') {
+        const body = await readJson(request);
+        const betId = String(body.betId || '').toLowerCase();
+        if (!UUID_RE.test(betId)) throw new ApiError(400, 'Apuesta inválida.');
+        const found = await pool.query(`
+            SELECT w.team, w.amount, b.winner_team FROM hatitix_bet_wagers w JOIN hatitix_bets b ON b.id = w.bet_id
+            WHERE w.bet_id = $1 AND w.account_id = $2 AND b.status = 'settled'`, [betId, user.id]);
+        if (!found.rows[0]) throw new ApiError(404, 'No hay nada para cobrar en esa apuesta.');
+        const marked = await pool.query('UPDATE hatitix_bet_wagers SET claimed = 1 WHERE bet_id = $1 AND account_id = $2 AND claimed = 0', [betId, user.id]);
+        if (!marked.rowCount) return reply({ claimed: false });
+        const won = found.rows[0].team === found.rows[0].winner_team, amount = Number(found.rows[0].amount);
+        return reply({ claimed: true, won, amount, delta: won ? amount : -amount });
+    }
+
+    const action = path.match(/^\/api\/bets\/([0-9a-f-]{36})\/(accept|reject|room|ready|start|settle|spectate|wager)$/i);
+    if (method !== 'POST' || !action || !UUID_RE.test(action[1])) return false;
+    const betId = action[1].toLowerCase(), what = action[2].toLowerCase();
+    const bet = await loadBet(betId);
+    if (!bet) throw new ApiError(404, 'La apuesta ya no existe.');
+    const isChallenger = bet.challenger_id === user.id, isRival = bet.rival_id === user.id;
+
+    if (what === 'accept') {
+        if (!isRival) throw new ApiError(403, 'Solo el rival puede aceptar esta apuesta.');
+        if (bet.status !== 'pending') throw new ApiError(409, 'Esta apuesta ya fue respondida o venció.');
+        await pool.query("UPDATE hatitix_bets SET status = 'accepted' WHERE id = $1 AND status = 'pending'", [betId]);
+        return reply({ status: 'accepted', amount: Number(bet.amount), message: 'Apuesta aceptada. El retador va a crear la sala 1v1.' });
+    }
+    if (what === 'reject') {
+        if (!isRival && !isChallenger) throw new ApiError(403, 'No participás en esta apuesta.');
+        if (!['pending', 'accepted'].includes(bet.status)) return reply({ status: bet.status, message: 'La apuesta ya estaba cerrada.' });
+        // Antes de que empiece el partido cualquiera de los dos puede cancelar. Si ya empezó y pasaron 6 minutos
+        // (un partido dura 3 como máximo), se considera trabada y también se puede cancelar: nadie gana ni pierde.
+        const done = await pool.query("UPDATE hatitix_bets SET status = 'rejected' WHERE id = $1 AND status IN ('pending', 'accepted') AND (started_at IS NULL OR started_at < datetime('now', '-6 minutes'))", [betId]);
+        if (!done.rowCount) throw new ApiError(409, 'El partido ya empezó y no se puede cancelar todavía. Si quedó trabado, probá de nuevo pasados 6 minutos desde que empezó.');
+        return reply({ status: 'rejected', message: 'Apuesta cancelada.' });
+    }
+    if (what === 'room') {
+        if (!isChallenger) throw new ApiError(403, 'Solo el retador crea la sala.');
+        if (bet.status !== 'accepted') throw new ApiError(409, 'La apuesta todavía no fue aceptada.');
+        const body = await readJson(request);
+        const roomId = String(body.roomId || ''), link = String(body.link || '').slice(0, 300), password = String(body.password || '');
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(roomId) || !/^https?:\/\//i.test(link)) throw new ApiError(400, 'Sala inválida.');
+        if (!/^[A-Za-z0-9_-]{4,40}$/.test(password)) throw new ApiError(400, 'La clave de la sala no es válida.');
+        const first = !bet.room_link;
+        await pool.query('UPDATE hatitix_bets SET room_id = $2, room_link = $3, room_password = $4 WHERE id = $1', [betId, roomId, link, password]);
+        let invited = 0;
+        if (first) {
+            // "Quiero spectear": se invita a los amigos conectados de ambos jugadores que no participan.
+            const seen = new Set([bet.challenger_id, bet.rival_id]);
+            for (const owner of [bet.challenger_id, bet.rival_id]) {
+                const friends = await pool.query(`
+                    SELECT a.* FROM hatitix_friendships f
+                    JOIN hatitix_accounts a ON a.id = CASE WHEN f.user_low = $1 THEN f.user_high ELSE f.user_low END
+                    WHERE f.user_low = $1 OR f.user_high = $1`, [owner]);
+                for (const friend of friends.rows) {
+                    if (seen.has(friend.id) || !presenceOf(friend).online || invited >= 40) continue;
+                    seen.add(friend.id);
+                    await pool.query('INSERT INTO hatitix_bet_spectators(bet_id, account_id) VALUES($1, $2) ON CONFLICT DO NOTHING', [betId, friend.id]);
+                    invited++;
+                }
+            }
+        }
+        return reply({ invited });
+    }
+    if (what === 'ready') {
+        if (!isRival) throw new ApiError(403, 'Solo el rival puede avisar que entró.');
+        const body = await readJson(request);
+        const name = socialCleanText(body.playerName, 40);
+        if (!name) throw new ApiError(400, 'Falta el nombre del jugador en la sala.');
+        await pool.query('UPDATE hatitix_bets SET rival_player_name = $2 WHERE id = $1', [betId, name]);
+        return reply({});
+    }
+    if (what === 'start') {
+        if (!isChallenger) throw new ApiError(403, 'Solo el anfitrión inicia el partido.');
+        if (bet.status !== 'accepted') throw new ApiError(409, 'La apuesta no está activa.');
+        await pool.query('UPDATE hatitix_bets SET started_at = CURRENT_TIMESTAMP WHERE id = $1 AND started_at IS NULL', [betId]);
+        return reply({});
+    }
+    if (what === 'settle') {
+        if (!isChallenger && !isRival) throw new ApiError(403, 'No participás en esta apuesta.');
+        // Si el que se fue ya reconoció la derrota, la apuesta está liquidada: al otro jugador se le responde que sí, sin error.
+        if (bet.status === 'settled') return reply({ state: 'settled', winnerTeam: bet.winner_team, message: 'Apuesta liquidada.' });
+        if (bet.status !== 'accepted') throw new ApiError(409, 'La apuesta no está activa.');
+        if (!bet.started_at) throw new ApiError(409, 'El partido todavía no empezó.');
+        const body = await readJson(request);
+        const winnerTeam = body.winnerTeam === 'blue' ? 'blue' : body.winnerTeam === 'red' ? 'red' : '';
+        if (!winnerTeam) throw new ApiError(400, 'Resultado inválido.');
+        if (body.forfeit === true) {
+            const mySide = isChallenger ? 'red' : 'blue';
+            if (winnerTeam !== mySide) {
+                // El que abandona reconoce la derrota: se liquida ya, sin esperar al otro.
+                await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2, status = 'settled', winner_team = $2, settled_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'accepted'`, [betId, winnerTeam]);
+                return reply({ state: 'settled', winnerTeam, message: 'Abandonaste el 1v1: perdiste la apuesta.' });
+            }
+            // El otro se fue: se anota y, si el rival no contesta en 90 s, se liquida a favor de quien informó (ver /api/bets/mine).
+            await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2, forfeit_at = CURRENT_TIMESTAMP WHERE id = $1`, [betId, winnerTeam]);
+            const check = await loadBet(betId);
+            if (!check.report_challenger || !check.report_rival) return reply({ state: 'waiting', message: 'Tu rival abandonó. Si no responde en 90 segundos, ganás la apuesta.' });
+            if (check.report_challenger === check.report_rival) {
+                await pool.query("UPDATE hatitix_bets SET status = 'settled', winner_team = $2, settled_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'accepted'", [betId, winnerTeam]);
+                return reply({ state: 'settled', winnerTeam, message: 'Apuesta liquidada.' });
+            }
+            await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE id = $1 AND status = 'accepted'", [betId]);
+            return reply({ state: 'cancelled', message: 'Los dos resultados no coinciden: la apuesta se anuló y nadie pierde puntos.' });
+        }
+        await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2 WHERE id = $1`, [betId, winnerTeam]);
+        const fresh = await loadBet(betId);
+        if (!fresh.report_challenger || !fresh.report_rival) return reply({ state: 'waiting', message: 'Resultado enviado. Esperando que tu rival lo confirme.' });
+        if (fresh.report_challenger === fresh.report_rival) {
+            await pool.query("UPDATE hatitix_bets SET status = 'settled', winner_team = $2, settled_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'accepted'", [betId, winnerTeam]);
+            return reply({ state: 'settled', winnerTeam, message: 'Apuesta liquidada.' });
+        }
+        await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE id = $1 AND status = 'accepted'", [betId]);
+        return reply({ state: 'cancelled', message: 'Los dos resultados no coinciden: la apuesta se anuló y nadie pierde puntos.' });
+    }
+    if (what === 'spectate') {
+        const body = await readJson(request);
+        const spectator = await pool.query('SELECT status FROM hatitix_bet_spectators WHERE bet_id = $1 AND account_id = $2', [betId, user.id]);
+        if (!spectator.rows[0]) throw new ApiError(403, 'No fuiste invitado a mirar esta apuesta.');
+        if (body.accept !== true) {
+            await pool.query("UPDATE hatitix_bet_spectators SET status = 'declined' WHERE bet_id = $1 AND account_id = $2", [betId, user.id]);
+            return reply({ joined: false });
+        }
+        if (bet.status !== 'accepted' || !bet.room_link) throw new ApiError(409, 'La apuesta ya terminó.');
+        await pool.query("UPDATE hatitix_bet_spectators SET status = 'joined' WHERE bet_id = $1 AND account_id = $2", [betId, user.id]);
+        return reply({ joined: true, roomId: bet.room_id, roomLink: bet.room_link, roomPassword: bet.room_password, started: !!bet.started_at, redName: bet.c_name, blueName: bet.r_name, amount: Number(bet.amount) });
+    }
+    if (what === 'wager') {
+        const spectator = await pool.query("SELECT 1 FROM hatitix_bet_spectators WHERE bet_id = $1 AND account_id = $2 AND status = 'joined'", [betId, user.id]);
+        if (!spectator.rowCount) throw new ApiError(403, 'Primero aceptá mirar la apuesta.');
+        if (bet.status !== 'accepted') throw new ApiError(409, 'La apuesta ya terminó.');
+        if (bet.started_at) throw new ApiError(409, 'El partido ya empezó: las apuestas están cerradas.');
+        const body = await readJson(request);
+        const team = body.team === 'blue' ? 'blue' : body.team === 'red' ? 'red' : '';
+        if (!team) throw new ApiError(400, 'Elegí rojo o azul.');
+        const amount = betPoints(body.amount, 'Tu apuesta');
+        const inserted = await pool.query("INSERT INTO hatitix_bet_wagers(id, bet_id, account_id, role, team, amount) VALUES($1, $2, $3, 'spectator', $4, $5) ON CONFLICT (bet_id, account_id) DO NOTHING", [crypto.randomUUID(), betId, user.id, team, amount]);
+        if (!inserted.rowCount) throw new ApiError(409, 'Ya apostaste en este partido.');
+        return reply({ team, amount, message: `Apostaste ${amount} puntos al ${team === 'red' ? 'rojo' : 'azul'}.` }, 201);
+    }
+    return false;
 }
 
 function createAccountApi(pool) {
@@ -249,8 +876,47 @@ function createAccountApi(pool) {
                 hours DOUBLE PRECISION NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            CREATE TABLE IF NOT EXISTS hatitix_maps (
+                id UUID PRIMARY KEY, name TEXT NOT NULL, author_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
+                author_name TEXT NOT NULL, data TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                likes INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, type TEXT NOT NULL DEFAULT 'comunidad'
+            );
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS likes INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS downloads INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_maps ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'comunidad';
+            CREATE TABLE IF NOT EXISTS hatitix_bets (
+                id UUID PRIMARY KEY,
+                room_id TEXT NOT NULL,
+                challenger_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
+                rival_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
+                amount INTEGER NOT NULL CHECK (amount > 0),
+                team TEXT NOT NULL DEFAULT 'red' CHECK (team IN ('red', 'blue')),
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'settled', 'cancelled')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS team TEXT NOT NULL DEFAULT 'red';
+            CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
         schemaReady = true;
+        try { await pool.query(BET_TABLES_SQL); }
+        catch (error) { console.error('No se pudieron crear las tablas de apuestas:', error.message); }
+        try {
+            // Cuentas creadas antes de este arreglo: se agregan al ranking con valores en 0.
+            await pool.query('INSERT INTO hatitix_account_stats(account_id) SELECT id FROM hatitix_accounts WHERE id NOT IN (SELECT account_id FROM hatitix_account_stats)');
+        } catch (error) { console.error('No se pudo completar el ranking de cuentas existentes:', error.message); }
+        try { await pool.query(SOCIAL_TABLES_SQL); }
+        catch (error) { console.error('No se pudieron crear las tablas de grupos/Parties:', error.message); }
+        const cleanupDays = Number(process.env.TURSO_CLEANUP_DAYS || 180);
+        if (Number.isInteger(cleanupDays) && cleanupDays >= 30) {
+            const cutoff = `-${cleanupDays} days`;
+            try {
+                await pool.query("DELETE FROM hatitix_messages WHERE created_at < datetime('now', $1)", [cutoff]);
+                await pool.query("DELETE FROM hatitix_group_messages WHERE created_at < datetime('now', $1)", [cutoff]);
+                await pool.query("DELETE FROM hatitix_party_invites WHERE created_at < datetime('now', '-2 days')");
+                await pool.query("DELETE FROM hatitix_sessions WHERE expires_at < CURRENT_TIMESTAMP");
+                await pool.query("DELETE FROM hatitix_bets WHERE status IN ('settled', 'cancelled', 'rejected') AND created_at < datetime('now', $1)", [cutoff]);
+            } catch (error) { console.error('No se pudo ejecutar la limpieza de datos antiguos:', error.message); }
+        }
     }
 
     function limited(request, response) {
@@ -283,7 +949,7 @@ function createAccountApi(pool) {
     async function createSession(accountId) {
         const token = crypto.randomBytes(36).toString('base64url');
         await pool.query(
-            'INSERT INTO hatitix_sessions(token_hash, account_id, expires_at) VALUES($1, $2, NOW() + ($3 * INTERVAL \'1 day\'))',
+            "INSERT INTO hatitix_sessions(token_hash, account_id, expires_at) VALUES($1, $2, datetime('now', '+' || $3 || ' days'))",
             [hashToken(token), accountId, SESSION_DAYS]
         );
         return token;
@@ -341,14 +1007,18 @@ function createAccountApi(pool) {
                         `, [crypto.randomUUID(), email, passwordHash, displayName, nameKey, tagCode, haxballName]);
                         account = result.rows[0]; break;
                     } catch (error) {
-                        if (error.code === '23505' && error.constraint === 'hatitix_accounts_email_key') {
+                        const text = `${error.code || ''} ${error.message || ''}`;
+                        const unique = error.code === '23505' || /UNIQUE constraint failed|SQLITE_CONSTRAINT/i.test(text);
+                        if (unique && /hatitix_accounts\.email|\bemail\b/i.test(text)) {
                             return json(response, 409, { ok: false, error: 'email_taken', message: 'Ya existe una cuenta con ese correo.' }), true;
                         }
-                        if (error.code === '23505' && attempt < 11) continue;
+                        if (unique && attempt < 11) continue;
                         throw error;
                     }
                 }
                 if (!account) return json(response, 503, { ok: false, error: 'tag_unavailable', message: 'No se pudo asignar un identificador. Vuelve a intentarlo.' }), true;
+                // Toda cuenta nueva aparece en el ranking desde el primer momento (0 goles, 0 horas).
+                await pool.query('INSERT INTO hatitix_account_stats(account_id) VALUES($1) ON CONFLICT DO NOTHING', [account.id]).catch((error) => console.error('No se pudo crear la fila de ranking:', error.message));
                 const token = await createSession(account.id);
                 json(response, 201, { ok: true, token, user: safeUser(account), emailVerified: false });
                 return true;
@@ -374,7 +1044,15 @@ function createAccountApi(pool) {
             const user = await sessionUser(request);
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
             touch(user);
-
+            if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
+            if (await handleSocialRoutes({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
+            if (request.method === 'GET' && url.pathname === '/api/news') {
+                json(response, 200, { ok: true, news: [
+                    { id: 1, title: '¡Bienvenidos a HaTitix!', date: '2026-11-14', content: 'Ya está disponible la Workshop de mapas comunitarios.' },
+                    { id: 2, title: 'Torneo de fin de semana', date: '2026-11-14', content: 'Prepárate para los próximos partidos de Futsal.' }
+                ] }); return true;
+            }
+            if (await handleBetRoutes({ request, url, response, pool, user, json, readJson, areFriends, presenceOf })) return true;
             if (request.method === 'GET' && url.pathname === '/api/me') {
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
             }
@@ -410,8 +1088,8 @@ function createAccountApi(pool) {
                 await pool.query(`
                     INSERT INTO hatitix_account_stats(account_id,goals,hours) VALUES($1,$2,$3)
                     ON CONFLICT (account_id) DO UPDATE SET
-                        goals=GREATEST(hatitix_account_stats.goals, EXCLUDED.goals),
-                        hours=GREATEST(hatitix_account_stats.hours, EXCLUDED.hours),
+                        goals=MAX(hatitix_account_stats.goals, EXCLUDED.goals),
+                        hours=MAX(hatitix_account_stats.hours, EXCLUDED.hours),
                         updated_at=NOW()
                 `, [user.id, goals, hours]);
                 json(response, 200, { ok: true }); return true;
@@ -449,9 +1127,20 @@ function createAccountApi(pool) {
                 const hash = crypto.createHash('sha256').update(normalizeCode(body.code)).digest('hex');
                 const reward = SPECIAL_CODES[hash];
                 if (!reward) return json(response, 404, { ok: false, error: 'invalid_code', message: 'Ese código no existe.' }), true;
-                // Canje atómico: solo se concede si la cuenta aún no tiene esta recompensa.
-                const result = await pool.query('UPDATE hatitix_accounts SET grants = array_append(grants, $2::text) WHERE id=$1 AND NOT ($2::text = ANY(grants)) RETURNING *', [user.id, reward.grant]);
-                if (!result.rowCount) return json(response, 409, { ok: false, error: 'already_redeemed', message: 'Esta cuenta ya canjeó ese código.' }), true;
+                // Turso guarda los grants como JSON en una columna TEXT.
+                const current = await pool.query('SELECT * FROM hatitix_accounts WHERE id=$1', [user.id]);
+                if (!current.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'Cuenta no encontrada.' }), true;
+                const grants = Array.isArray(current.rows[0].grants) ? current.rows[0].grants.slice() : parsePins(current.rows[0].grants || '[]');
+                const grantIds = grants.map((item) => typeof item === 'string' ? item : item?.grant).filter(Boolean);
+                if (grantIds.includes(reward.grant)) return json(response, 409, { ok: false, error: 'already_redeemed', message: 'Esta cuenta ya canjeó ese código.' }), true;
+                if (reward.fixedTag) {
+                    const taken = await pool.query('SELECT id FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2 AND id<>$3', [accountTagKey(reward.fixedTag.displayName), reward.fixedTag.tagCode, user.id]);
+                    if (taken.rows[0]) return json(response, 409, { ok: false, error: 'tag_taken', message: 'El identificador Titi#0000 ya está ocupado.' }), true;
+                }
+                grants.push(reward.grant);
+                const result = reward.fixedTag
+                    ? await pool.query('UPDATE hatitix_accounts SET display_name=$2,name_key=$3,tag_code=$4,grants=$5 WHERE id=$1 RETURNING *', [user.id, reward.fixedTag.displayName, accountTagKey(reward.fixedTag.displayName), reward.fixedTag.tagCode, JSON.stringify(grants)])
+                    : await pool.query('UPDATE hatitix_accounts SET grants=$2 WHERE id=$1 RETURNING *', [user.id, JSON.stringify(grants)]);
                 json(response, 200, { ok: true, points: reward.points, grant: reward.grant, message: reward.message, user: safeUser(result.rows[0]) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/users/search') {
@@ -574,8 +1263,8 @@ function createAccountApi(pool) {
             json(response, 404, { ok: false, error: 'not_found', message: 'Ruta de API no encontrada.' });
             return true;
         } catch (error) {
-            console.error('Error en API de cuentas:', error.message);
-            json(response, Number(error.status) || 500, { ok: false, error: Number(error.status) === 413 ? 'payload_too_large' : 'server_error', message: Number(error.status) ? error.message : 'Error interno del servidor.' });
+            if (!(Number(error.status) >= 400 && Number(error.status) < 500)) console.error('Error en API de cuentas:', error.stack || error.message);
+            json(response, Number(error.status) || 500, { ok: false, error: Number(error.status) === 413 ? 'payload_too_large' : 'server_error', message: Number(error.status) ? error.message : `Error interno del servidor: ${String(error.message || error).slice(0, 160)}` });
             return true;
         }
     }
