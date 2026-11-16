@@ -508,6 +508,7 @@ ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS report_challenger TEXT;
 ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS report_rival TEXT;
 ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS winner_team TEXT;
 ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS settled_at TEXT;
+ALTER TABLE hatitix_bets ADD COLUMN IF NOT EXISTS forfeit_at TEXT;
 CREATE TABLE IF NOT EXISTS hatitix_bet_wagers (
     id UUID PRIMARY KEY,
     bet_id UUID NOT NULL REFERENCES hatitix_bets(id) ON DELETE CASCADE,
@@ -572,6 +573,10 @@ async function handleBetRoutes(ctx) {
     if (method === 'GET' && path === '/api/bets/mine') {
         await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE status = 'pending' AND created_at < datetime('now', '-10 minutes')");
         await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE status = 'accepted' AND created_at < datetime('now', '-4 hours')");
+        // Abandono: si uno informó que el rival se fue y el rival no contestó en 90 s, gana quien informó.
+        await pool.query(`UPDATE hatitix_bets SET status = 'settled', winner_team = COALESCE(report_challenger, report_rival), settled_at = CURRENT_TIMESTAMP
+            WHERE status = 'accepted' AND started_at IS NOT NULL AND forfeit_at IS NOT NULL AND forfeit_at < datetime('now', '-90 seconds')
+              AND ((report_challenger IS NULL AND report_rival IS NOT NULL) OR (report_challenger IS NOT NULL AND report_rival IS NULL))`);
         const mine = await pool.query(`${BET_WITH_NAMES_SQL}
             WHERE (b.challenger_id = $1 OR b.rival_id = $1) AND b.status IN ('pending', 'accepted')
             ORDER BY b.created_at DESC LIMIT 10`, [user.id]);
@@ -653,8 +658,11 @@ async function handleBetRoutes(ctx) {
     }
     if (what === 'reject') {
         if (!isRival && !isChallenger) throw new ApiError(403, 'No participás en esta apuesta.');
-        // Antes de que empiece el partido cualquiera de los dos puede cancelar.
-        await pool.query("UPDATE hatitix_bets SET status = 'rejected' WHERE id = $1 AND status IN ('pending', 'accepted') AND started_at IS NULL", [betId]);
+        if (!['pending', 'accepted'].includes(bet.status)) return reply({ status: bet.status, message: 'La apuesta ya estaba cerrada.' });
+        // Antes de que empiece el partido cualquiera de los dos puede cancelar. Si ya empezó y pasaron 6 minutos
+        // (un partido dura 3 como máximo), se considera trabada y también se puede cancelar: nadie gana ni pierde.
+        const done = await pool.query("UPDATE hatitix_bets SET status = 'rejected' WHERE id = $1 AND status IN ('pending', 'accepted') AND (started_at IS NULL OR started_at < datetime('now', '-6 minutes'))", [betId]);
+        if (!done.rowCount) throw new ApiError(409, 'El partido ya empezó y no se puede cancelar todavía. Si quedó trabado, probá de nuevo pasados 6 minutos desde que empezó.');
         return reply({ status: 'rejected', message: 'Apuesta cancelada.' });
     }
     if (what === 'room') {
@@ -701,11 +709,31 @@ async function handleBetRoutes(ctx) {
     }
     if (what === 'settle') {
         if (!isChallenger && !isRival) throw new ApiError(403, 'No participás en esta apuesta.');
+        // Si el que se fue ya reconoció la derrota, la apuesta está liquidada: al otro jugador se le responde que sí, sin error.
+        if (bet.status === 'settled') return reply({ state: 'settled', winnerTeam: bet.winner_team, message: 'Apuesta liquidada.' });
         if (bet.status !== 'accepted') throw new ApiError(409, 'La apuesta no está activa.');
         if (!bet.started_at) throw new ApiError(409, 'El partido todavía no empezó.');
         const body = await readJson(request);
         const winnerTeam = body.winnerTeam === 'blue' ? 'blue' : body.winnerTeam === 'red' ? 'red' : '';
         if (!winnerTeam) throw new ApiError(400, 'Resultado inválido.');
+        if (body.forfeit === true) {
+            const mySide = isChallenger ? 'red' : 'blue';
+            if (winnerTeam !== mySide) {
+                // El que abandona reconoce la derrota: se liquida ya, sin esperar al otro.
+                await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2, status = 'settled', winner_team = $2, settled_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'accepted'`, [betId, winnerTeam]);
+                return reply({ state: 'settled', winnerTeam, message: 'Abandonaste el 1v1: perdiste la apuesta.' });
+            }
+            // El otro se fue: se anota y, si el rival no contesta en 90 s, se liquida a favor de quien informó (ver /api/bets/mine).
+            await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2, forfeit_at = CURRENT_TIMESTAMP WHERE id = $1`, [betId, winnerTeam]);
+            const check = await loadBet(betId);
+            if (!check.report_challenger || !check.report_rival) return reply({ state: 'waiting', message: 'Tu rival abandonó. Si no responde en 90 segundos, ganás la apuesta.' });
+            if (check.report_challenger === check.report_rival) {
+                await pool.query("UPDATE hatitix_bets SET status = 'settled', winner_team = $2, settled_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'accepted'", [betId, winnerTeam]);
+                return reply({ state: 'settled', winnerTeam, message: 'Apuesta liquidada.' });
+            }
+            await pool.query("UPDATE hatitix_bets SET status = 'cancelled' WHERE id = $1 AND status = 'accepted'", [betId]);
+            return reply({ state: 'cancelled', message: 'Los dos resultados no coinciden: la apuesta se anuló y nadie pierde puntos.' });
+        }
         await pool.query(`UPDATE hatitix_bets SET ${isChallenger ? 'report_challenger' : 'report_rival'} = $2 WHERE id = $1`, [betId, winnerTeam]);
         const fresh = await loadBet(betId);
         if (!fresh.report_challenger || !fresh.report_rival) return reply({ state: 'waiting', message: 'Resultado enviado. Esperando que tu rival lo confirme.' });
