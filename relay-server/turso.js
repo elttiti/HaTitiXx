@@ -27,6 +27,8 @@ function splitStatements(sql) {
 
 function normalizeSql(sql) {
     return String(sql)
+        // Los casts de PostgreSQL se quitan primero, antes de renombrar tipos (si no, ::double precision queda como ::REAL).
+        .replace(/::(?:uuid\[\]|uuid|text\[\]|text|bigint|double\s+precision|real|numeric|boolean|integer|int)\b/gi, '')
         .replace(/\bTIMESTAMPTZ\b/gi, 'TEXT')
         .replace(/\bTIMESTAMP\b/gi, 'TEXT')
         .replace(/\bDOUBLE PRECISION\b/gi, 'REAL')
@@ -37,9 +39,11 @@ function normalizeSql(sql) {
         .replace(/DEFAULT\s*'\{\}'/gi, "DEFAULT '[]'")
         .replace(/(ALTER\s+TABLE\s+[^;]+?\s+ADD\s+COLUMN)\s+IF\s+NOT\s+EXISTS/gi, '$1')
         .replace(/\bNOW\(\)/gi, 'CURRENT_TIMESTAMP')
-        .replace(/\s+FOR\s+UPDATE\b/gi, '')
+        .replace(/\s+FOR\s+UPDATE(?:\s+OF\s+[\w.,\s]+?)?(?=\s*(?:;|$|\)|\bLIMIT\b|\bORDER\b))/gi, '')
+        .replace(/\bGREATEST\s*\(/gi, 'MAX(')
+        .replace(/\bLEAST\s*\(/gi, 'MIN(')
+        .replace(/\bIS\s+DISTINCT\s+FROM\b/gi, 'IS NOT')
         .replace(/\bILIKE\b/gi, 'LIKE')
-        .replace(/::(?:uuid\[\]|uuid|text|bigint|double precision|int|integer)/gi, '')
         .replace(/INTERVAL\s*'1 day'/gi, "'1 day'")
         .replace(/CURRENT_TIMESTAMP\s*-\s*'1 day'/gi, "datetime('now', '-1 day')");
 }
