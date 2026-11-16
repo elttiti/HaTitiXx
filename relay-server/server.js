@@ -170,7 +170,7 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
     if (request.method === 'GET' && url.pathname === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-        response.end(JSON.stringify({ ok: true, service: 'hatitix-webrtc-signaling', version: 4, mediaRelay: false, accounts: !!accountApi?.isReady() }));
+        response.end(JSON.stringify({ ok: true, service: 'hatitix-webrtc-signaling', version: 4, build: 'apuestas-v2', mediaRelay: false, accounts: !!accountApi?.isReady() }));
         return;
     }
     if (url.pathname.startsWith('/api/')) {
