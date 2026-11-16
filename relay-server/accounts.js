@@ -32,6 +32,11 @@ const SPECIAL_CODES = Object.freeze({
     '014c98a46aaa02817caf27690482bfe60a63f7d39ebaba334c97cc9c3ffcbeda': Object.freeze({
         grant: 'owner', points: 0,
         message: 'Código de dueño aceptado: desbloqueaste la corona 👑 y el pin OWNER.'
+    }),
+    '04a3d3c7794f380848a024838b40b52596717170ab8e6eada048a6b45ca55645': Object.freeze({
+        grant: 'titi-id', points: 0,
+        fixedTag: Object.freeze({ displayName: 'Titi', tagCode: '0000' }),
+        message: 'Código aceptado: tu identificador de jugador ahora es Titi#0000.'
     })
 });
 // Pines que solo se obtienen con un código (el servidor fija su aspecto; el cliente no puede inventarlos).
@@ -840,8 +845,14 @@ function createAccountApi(pool) {
                 const grants = Array.isArray(current.rows[0].grants) ? current.rows[0].grants.slice() : parsePins(current.rows[0].grants || '[]');
                 const grantIds = grants.map((item) => typeof item === 'string' ? item : item?.grant).filter(Boolean);
                 if (grantIds.includes(reward.grant)) return json(response, 409, { ok: false, error: 'already_redeemed', message: 'Esta cuenta ya canjeó ese código.' }), true;
+                if (reward.fixedTag) {
+                    const taken = await pool.query('SELECT id FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2 AND id<>$3', [accountTagKey(reward.fixedTag.displayName), reward.fixedTag.tagCode, user.id]);
+                    if (taken.rows[0]) return json(response, 409, { ok: false, error: 'tag_taken', message: 'El identificador Titi#0000 ya está ocupado.' }), true;
+                }
                 grants.push(reward.grant);
-                const result = await pool.query('UPDATE hatitix_accounts SET grants=$2 WHERE id=$1 RETURNING *', [user.id, JSON.stringify(grants)]);
+                const result = reward.fixedTag
+                    ? await pool.query('UPDATE hatitix_accounts SET display_name=$2,name_key=$3,tag_code=$4,grants=$5 WHERE id=$1 RETURNING *', [user.id, reward.fixedTag.displayName, accountTagKey(reward.fixedTag.displayName), reward.fixedTag.tagCode, JSON.stringify(grants)])
+                    : await pool.query('UPDATE hatitix_accounts SET grants=$2 WHERE id=$1 RETURNING *', [user.id, JSON.stringify(grants)]);
                 json(response, 200, { ok: true, points: reward.points, grant: reward.grant, message: reward.message, user: safeUser(result.rows[0]) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/users/search') {
