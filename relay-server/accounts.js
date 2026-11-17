@@ -1235,7 +1235,14 @@ function createAccountApi(pool) {
             if (request.method === 'GET' && url.pathname === '/api/messages/unread') {
                 const { rows } = await pool.query('SELECT sender_id, COUNT(*)::int AS n FROM hatitix_messages WHERE receiver_id=$1 AND read_at IS NULL GROUP BY sender_id', [user.id]);
                 const counts = {}; for (const row of rows) counts[row.sender_id] = row.n;
-                json(response, 200, { ok: true, counts }); return true;
+                // Invitaciones a sala recientes sin leer: el cliente las muestra en pantalla sin marcarlas como leídas.
+                const pending = await pool.query(`
+                    SELECT m.id, m.body, a.display_name AS from_name FROM hatitix_messages m
+                    JOIN hatitix_accounts a ON a.id = m.sender_id
+                    WHERE m.receiver_id = $1 AND m.read_at IS NULL AND m.body LIKE '%sala de HaTitix: http%' AND m.created_at > datetime('now', '-15 minutes')
+                    ORDER BY m.id DESC LIMIT 5`, [user.id]);
+                const roomInvites = pending.rows.map((row) => ({ id: Number(row.id), fromName: row.from_name, link: (String(row.body).match(/https?:\/\/\S+/) || [''])[0] }));
+                json(response, 200, { ok: true, counts, roomInvites }); return true;
             }
             const messageRoute = url.pathname.match(/^\/api\/messages\/([0-9a-f-]{36})$/i);
             if (messageRoute && UUID_RE.test(messageRoute[1])) {
