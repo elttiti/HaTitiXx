@@ -530,7 +530,6 @@ CREATE TABLE IF NOT EXISTS hatitix_bet_spectators (
 );
 CREATE INDEX IF NOT EXISTS hatitix_bet_spectators_account_idx ON hatitix_bet_spectators(account_id);
 `;
-const BET_MAX_POINTS = 1000;
 const BET_WITH_NAMES_SQL = `
     SELECT b.*, c.display_name AS c_name, c.tag_code AS c_code, r.display_name AS r_name, r.tag_code AS r_code
     FROM hatitix_bets b
@@ -544,7 +543,7 @@ async function handleBetRoutes(ctx) {
     const reply = (payload, status = 200) => { json(response, status, { ok: true, ...payload }); return true; };
     const betPoints = (value, label = 'El monto') => {
         const amount = Number(value);
-        if (!Number.isSafeInteger(amount) || amount < 1 || amount > BET_MAX_POINTS) throw new ApiError(400, `${label} debe ser un número entero entre 1 y ${BET_MAX_POINTS}.`);
+        if (!Number.isSafeInteger(amount) || amount < 1) throw new ApiError(400, `${label} debe ser un número entero mayor a 0.`);
         return amount;
     };
     const loadBet = async (id) => (await pool.query(`${BET_WITH_NAMES_SQL} WHERE b.id = $1`, [id])).rows[0] || null;
@@ -1054,6 +1053,8 @@ function createAccountApi(pool) {
             }
             if (await handleBetRoutes({ request, url, response, pool, user, json, readJson, areFriends, presenceOf })) return true;
             if (request.method === 'GET' && url.pathname === '/api/me') {
+                const bearer = String(request.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+                if (bearer) await pool.query("UPDATE hatitix_sessions SET expires_at = datetime('now', '+' || $2 || ' days') WHERE token_hash = $1", [hashToken(bearer), SESSION_DAYS]).catch(() => {});
                 json(response, 200, { ok: true, user: safeUser(user) }); return true;
             }
             if (request.method === 'PATCH' && url.pathname === '/api/me') {
