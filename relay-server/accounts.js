@@ -875,6 +875,8 @@ function createAccountApi(pool) {
                 hours DOUBLE PRECISION NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+            ALTER TABLE hatitix_account_stats ADD COLUMN IF NOT EXISTS assists BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_account_stats ADD COLUMN IF NOT EXISTS matches BIGINT NOT NULL DEFAULT 0;
             CREATE TABLE IF NOT EXISTS hatitix_maps (
                 id UUID PRIMARY KEY, name TEXT NOT NULL, author_id UUID REFERENCES hatitix_accounts(id) ON DELETE SET NULL,
                 author_name TEXT NOT NULL, data TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1086,19 +1088,24 @@ function createAccountApi(pool) {
                 const body = await readJson(request);
                 const goals = Math.max(0, Math.min(1000000000, Math.floor(Number(body.goals) || 0)));
                 const hours = Math.max(0, Math.min(100000000, Number(body.hours) || 0));
+                const assists = Math.max(0, Math.min(1000000000, Math.floor(Number(body.assists) || 0)));
+                const matches = Math.max(0, Math.min(1000000000, Math.floor(Number(body.matches) || 0)));
                 await pool.query(`
-                    INSERT INTO hatitix_account_stats(account_id,goals,hours) VALUES($1,$2,$3)
+                    INSERT INTO hatitix_account_stats(account_id,goals,hours,assists,matches) VALUES($1,$2,$3,$4,$5)
                     ON CONFLICT (account_id) DO UPDATE SET
                         goals=MAX(hatitix_account_stats.goals, EXCLUDED.goals),
                         hours=MAX(hatitix_account_stats.hours, EXCLUDED.hours),
+                        assists=MAX(hatitix_account_stats.assists, EXCLUDED.assists),
+                        matches=MAX(hatitix_account_stats.matches, EXCLUDED.matches),
                         updated_at=NOW()
-                `, [user.id, goals, hours]);
+                `, [user.id, goals, hours, assists, matches]);
                 json(response, 200, { ok: true }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/ranking/friends') {
                 const { rows } = await pool.query(`
                     SELECT a.id, a.display_name, a.tag_code, COALESCE(s.goals,0)::bigint AS goals,
-                           COALESCE(s.hours,0)::double precision AS hours
+                           COALESCE(s.hours,0)::double precision AS hours,
+                           COALESCE(s.assists,0)::bigint AS assists, COALESCE(s.matches,0)::bigint AS matches
                     FROM hatitix_accounts a
                     LEFT JOIN hatitix_account_stats s ON s.account_id=a.id
                     WHERE a.id=$1 OR a.id IN (
@@ -1107,17 +1114,18 @@ function createAccountApi(pool) {
                     )
                     ORDER BY goals DESC, hours DESC, a.display_name ASC LIMIT 100
                 `, [user.id]);
-                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0 })) }); return true;
+                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0, assists: Number(row.assists) || 0, matches: Number(row.matches) || 0 })) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/ranking/global') {
                 const { rows } = await pool.query(`
                     SELECT a.id, a.display_name, a.tag_code, COALESCE(s.goals,0)::bigint AS goals,
-                           COALESCE(s.hours,0)::double precision AS hours
+                           COALESCE(s.hours,0)::double precision AS hours,
+                           COALESCE(s.assists,0)::bigint AS assists, COALESCE(s.matches,0)::bigint AS matches
                     FROM hatitix_accounts a
                     LEFT JOIN hatitix_account_stats s ON s.account_id=a.id
                     ORDER BY goals DESC, hours DESC, a.display_name ASC LIMIT 100
                 `);
-                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0 })) }); return true;
+                json(response, 200, { ok: true, entries: rows.map((row) => ({ id: row.id, name: row.display_name, tag: `${row.display_name}#${row.tag_code}`, goals: Number(row.goals) || 0, hours: Number(row.hours) || 0, assists: Number(row.assists) || 0, matches: Number(row.matches) || 0 })) }); return true;
             }
             if (request.method === 'POST' && url.pathname === '/api/presence') {
                 json(response, 200, { ok: true }); return true;
