@@ -1136,6 +1136,14 @@ function createAccountApi(pool) {
                 const hash = crypto.createHash('sha256').update(normalizeCode(body.code)).digest('hex');
                 const reward = SPECIAL_CODES[hash];
                 if (!reward) return json(response, 404, { ok: false, error: 'invalid_code', message: 'Ese código no existe.' }), true;
+                // El pin OWNER solo lo puede canjear la cuenta configurada en OWNER_ACCOUNT_EMAIL (variable de entorno en Render).
+                if (reward.grant === 'owner') {
+                    const ownerEmail = String(process.env.OWNER_ACCOUNT_EMAIL || '').trim().toLowerCase();
+                    const accountEmail = String(user.email || '').trim().toLowerCase();
+                    if (!ownerEmail || accountEmail !== ownerEmail) {
+                        return json(response, 403, { ok: false, error: 'not_allowed', message: 'Ese código solo lo puede usar la cuenta del dueño.' }), true;
+                    }
+                }
                 // Turso guarda los grants como JSON en una columna TEXT.
                 const current = await pool.query('SELECT * FROM hatitix_accounts WHERE id=$1', [user.id]);
                 if (!current.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'Cuenta no encontrada.' }), true;
