@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { WebSocketServer, WebSocket } = require('ws');
-const { createAccountApi } = require('./accounts');
+const { createAccountApi, ipKey } = require('./accounts');
 const { createTursoPool } = require('./turso');
 
 function loadLocalEnvFile() {
@@ -168,6 +168,13 @@ function validSignal(message) {
 
 const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
+    // Las IPs baneadas (ver /api/admin/ban-ip) no pueden usar nada de la API ni del WebSocket.
+    // El /health se deja pasar para no romper el monitoreo de Render.
+    if (url.pathname !== '/health' && accountApi?.isBannedIp(ipKey(request))) {
+        response.writeHead(403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ ok: false, error: 'banned', message: 'Tu acceso a HaTitix fue bloqueado.' }));
+        return;
+    }
     if (request.method === 'GET' && url.pathname === '/health') {
         response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
         response.end(JSON.stringify({ ok: true, service: 'hatitix-webrtc-signaling', version: 4, build: 'apuestas-v3', mediaRelay: false, accounts: !!accountApi?.isReady() }));
@@ -189,6 +196,7 @@ const server = http.createServer(async (request, response) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES, perMessageDeflate: false });
 server.on('upgrade', (request, socket, head) => {
     if (request.url !== '/ws') { socket.destroy(); return; }
+    if (accountApi?.isBannedIp(ipKey(request))) { socket.destroy(); return; }
     wss.handleUpgrade(request, socket, head, (client) => wss.emit('connection', client, request));
 });
 

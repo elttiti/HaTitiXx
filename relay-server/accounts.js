@@ -782,14 +782,24 @@ function createAccountApi(pool) {
     const authAttempts = new Map();
     const messageBuckets = new Map();
     const redeemBuckets = new Map();
+    // IPs baneadas: viven en la base (para que persistan si Render reinicia el servicio) y en memoria
+    // (para no consultar la base en cada request/conexión). loadBannedIps() las carga al arrancar.
+    const bannedIps = new Set();
+    async function loadBannedIps() {
+        try {
+            const { rows } = await pool.query('SELECT ip FROM hatitix_banned_ips');
+            bannedIps.clear();
+            for (const row of rows) bannedIps.add(row.ip);
+        } catch (error) { console.error('No se pudieron cargar las IPs baneadas:', error.message); }
+    }
     const lastSeen = new Map();      // id -> última actividad (ms) en memoria
     const lastPersisted = new Map(); // id -> última vez que se guardó last_seen en la base
-    function touch(user) {
+    function touch(user, ip) {
         const now = Date.now();
         lastSeen.set(user.id, now);
         if (now - (lastPersisted.get(user.id) || 0) > 60000) {
             lastPersisted.set(user.id, now);
-            pool.query('UPDATE hatitix_accounts SET last_seen=NOW() WHERE id=$1', [user.id]).catch(() => {});
+            pool.query('UPDATE hatitix_accounts SET last_seen=NOW(), last_ip=$2 WHERE id=$1', [user.id, String(ip || '').slice(0, 80)]).catch(() => {});
         }
         if (lastSeen.size > 20000) for (const [k, v] of lastSeen) if (now - v > 3600000) { lastSeen.delete(k); lastPersisted.delete(k); }
     }
@@ -842,6 +852,12 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS crown_on BOOLEAN NOT NULL DEFAULT TRUE;
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS admin_points_total BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS last_ip TEXT NOT NULL DEFAULT '';
+            CREATE TABLE IF NOT EXISTS hatitix_banned_ips (
+                ip TEXT PRIMARY KEY,
+                reason TEXT NOT NULL DEFAULT '',
+                banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
             CREATE TABLE IF NOT EXISTS hatitix_sessions (
                 token_hash CHAR(64) PRIMARY KEY,
                 account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
@@ -907,6 +923,7 @@ function createAccountApi(pool) {
             CREATE INDEX IF NOT EXISTS hatitix_bets_room_idx ON hatitix_bets(room_id, created_at DESC);
         `);
         schemaReady = true;
+        await loadBannedIps();
         try { await pool.query(BET_TABLES_SQL); }
         catch (error) { console.error('No se pudieron crear las tablas de apuestas:', error.message); }
         try {
@@ -1052,7 +1069,7 @@ function createAccountApi(pool) {
 
             const user = await sessionUser(request);
             if (!user) { json(response, 401, { ok: false, error: 'unauthorized', message: 'Inicia sesión para continuar.' }); return true; }
-            touch(user);
+            touch(user, ipKey(request));
             if (await handleCommunityMaps({ request, url, response, pool, user, json, readJson })) return true;
             if (await handleSocialRoutes({ request, url, response, pool, user, json, readJson, areFriends, messageLimited })) return true;
             if (request.method === 'GET' && url.pathname === '/api/news') {
@@ -1163,6 +1180,88 @@ function createAccountApi(pool) {
                     ? await pool.query('UPDATE hatitix_accounts SET display_name=$2,name_key=$3,tag_code=$4,grants=$5 WHERE id=$1 RETURNING *', [user.id, reward.fixedTag.displayName, accountTagKey(reward.fixedTag.displayName), reward.fixedTag.tagCode, JSON.stringify(grants)])
                     : await pool.query('UPDATE hatitix_accounts SET grants=$2 WHERE id=$1 RETURNING *', [user.id, JSON.stringify(grants)]);
                 json(response, 200, { ok: true, points: reward.points, grant: reward.grant, message: reward.message, user: safeUser(result.rows[0]) }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/ban-ip') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request);
+                const ip = String(body.ip || '').trim().slice(0, 80);
+                if (!ip) return json(response, 400, { ok: false, error: 'invalid_ip', message: 'Falta la IP.' }), true;
+                const reason = String(body.reason || '').trim().slice(0, 200);
+                await pool.query('INSERT INTO hatitix_banned_ips(ip, reason) VALUES($1,$2) ON CONFLICT (ip) DO UPDATE SET reason=EXCLUDED.reason', [ip, reason]);
+                bannedIps.add(ip);
+                json(response, 200, { ok: true, ip, reason }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/unban-ip') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request);
+                const ip = String(body.ip || '').trim().slice(0, 80);
+                if (!ip) return json(response, 400, { ok: false, error: 'invalid_ip', message: 'Falta la IP.' }), true;
+                await pool.query('DELETE FROM hatitix_banned_ips WHERE ip=$1', [ip]);
+                bannedIps.delete(ip);
+                json(response, 200, { ok: true, ip }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/ban-player') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request);
+                const tag = String(body.tag || '').trim();
+                const match = tag.match(/^(.{2,24})#(\d{4})$/u);
+                if (!match) return json(response, 400, { ok: false, error: 'invalid_tag', message: 'Usa el formato Nombre#1234.' }), true;
+                const found = await pool.query('SELECT * FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2', [accountTagKey(match[1]), match[2]]);
+                if (!found.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
+                const ip = String(found.rows[0].last_ip || '').trim();
+                if (!ip) return json(response, 409, { ok: false, error: 'no_ip_known', message: 'Todavía no tenemos registrada ninguna IP para esa cuenta (necesita iniciar sesión al menos una vez después de esta actualización). Probá de nuevo más tarde.' }), true;
+                const reason = String(body.reason || '').trim().slice(0, 200);
+                await pool.query('INSERT INTO hatitix_banned_ips(ip, reason) VALUES($1,$2) ON CONFLICT (ip) DO UPDATE SET reason=EXCLUDED.reason', [ip, reason ? `${reason} (${tag})` : `Baneado por nombre: ${tag}`]);
+                bannedIps.add(ip);
+                json(response, 200, { ok: true, tag, ip, reason }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/unban-player') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request);
+                const tag = String(body.tag || '').trim();
+                const match = tag.match(/^(.{2,24})#(\d{4})$/u);
+                if (!match) return json(response, 400, { ok: false, error: 'invalid_tag', message: 'Usa el formato Nombre#1234.' }), true;
+                const found = await pool.query('SELECT * FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2', [accountTagKey(match[1]), match[2]]);
+                if (!found.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
+                const ip = String(found.rows[0].last_ip || '').trim();
+                if (ip) { await pool.query('DELETE FROM hatitix_banned_ips WHERE ip=$1', [ip]); bannedIps.delete(ip); }
+                json(response, 200, { ok: true, tag, ip }); return true;
+            }
+            if (request.method === 'GET' && url.pathname === '/api/admin/banned-ips') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const { rows } = await pool.query('SELECT ip, reason, banned_at FROM hatitix_banned_ips ORDER BY banned_at DESC');
+                json(response, 200, { ok: true, banned: rows }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/reset-codes') {
+                // Borra grants (OWNER/BETATESTER) de una cuenta para que pueda volver a canjear el código.
+                // Sin "tag" en el body, se aplica a tu propia cuenta. Con "tag", a la cuenta de ese Nombre#1234.
+                // Sin "grant" en el body, borra TODOS los grants de esa cuenta; con "grant", borra solo ese.
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request).catch(() => ({}));
+                const tag = String(body.tag || '').trim();
+                const grant = body.grant === undefined || body.grant === null ? null : String(body.grant).trim();
+                if (grant !== null && grant !== 'owner' && grant !== 'betatester') {
+                    return json(response, 400, { ok: false, error: 'invalid_grant', message: 'grant debe ser "owner" o "betatester" (o no enviarlo, para borrar todos).' }), true;
+                }
+                let targetId = user.id;
+                if (tag) {
+                    const match = tag.match(/^(.{2,24})#(\d{4})$/u);
+                    if (!match) return json(response, 400, { ok: false, error: 'invalid_tag', message: 'Usa el formato Nombre#1234.' }), true;
+                    const found = await pool.query('SELECT id FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2', [accountTagKey(match[1]), match[2]]);
+                    if (!found.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
+                    targetId = found.rows[0].id;
+                }
+                let result;
+                if (grant === null) {
+                    result = await pool.query("UPDATE hatitix_accounts SET grants='[]' WHERE id=$1 RETURNING *", [targetId]);
+                } else {
+                    const current = await pool.query('SELECT * FROM hatitix_accounts WHERE id=$1', [targetId]);
+                    if (!current.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
+                    const grants = (Array.isArray(current.rows[0].grants) ? current.rows[0].grants : parsePins(current.rows[0].grants || '[]'))
+                        .filter((item) => (typeof item === 'string' ? item : item?.grant) !== grant);
+                    result = await pool.query('UPDATE hatitix_accounts SET grants=$2 WHERE id=$1 RETURNING *', [targetId, JSON.stringify(grants)]);
+                }
+                json(response, 200, { ok: true, user: safeUser(result.rows[0]) }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/users/search') {
                 const tag = String(url.searchParams.get('tag') || '').trim();
@@ -1313,7 +1412,7 @@ function createAccountApi(pool) {
         }
     }
 
-    return { initialize, handle, isReady: () => schemaReady };
+    return { initialize, handle, isReady: () => schemaReady, isBannedIp: (ip) => bannedIps.has(ip) };
 }
 
-module.exports = { createAccountApi };
+module.exports = { createAccountApi, ipKey };
