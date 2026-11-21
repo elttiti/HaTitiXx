@@ -108,8 +108,15 @@ function safeUser(row) {
         grants: grants.filter((g) => g === 'owner' || g === 'betatester'),
         crownOn,
         crown: grants.includes('owner') && crownOn,
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        // Total acumulado de puntos que el dueño le sumó/restó a esta cuenta (ver /api/admin/points).
+        // El cliente compara este número con el último que vio y aplica solo la diferencia, una vez.
+        adminPointsTotal: Number(row.admin_points_total) || 0
     };
+}
+function isOwnerEmail(user) {
+    const ownerEmail = String(process.env.OWNER_ACCOUNT_EMAIL || '').trim().toLowerCase();
+    return !!ownerEmail && String(user?.email || '').trim().toLowerCase() === ownerEmail;
 }
 function json(response, status, payload) {
     response.writeHead(status, {
@@ -834,6 +841,7 @@ function createAccountApi(pool) {
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS grants TEXT[] NOT NULL DEFAULT '{}';
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS crown_on BOOLEAN NOT NULL DEFAULT TRUE;
             ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+            ALTER TABLE hatitix_accounts ADD COLUMN IF NOT EXISTS admin_points_total BIGINT NOT NULL DEFAULT 0;
             CREATE TABLE IF NOT EXISTS hatitix_sessions (
                 token_hash CHAR(64) PRIMARY KEY,
                 account_id UUID NOT NULL REFERENCES hatitix_accounts(id) ON DELETE CASCADE,
@@ -1137,12 +1145,8 @@ function createAccountApi(pool) {
                 const reward = SPECIAL_CODES[hash];
                 if (!reward) return json(response, 404, { ok: false, error: 'invalid_code', message: 'Ese código no existe.' }), true;
                 // El pin OWNER solo lo puede canjear la cuenta configurada en OWNER_ACCOUNT_EMAIL (variable de entorno en Render).
-                if (reward.grant === 'owner') {
-                    const ownerEmail = String(process.env.OWNER_ACCOUNT_EMAIL || '').trim().toLowerCase();
-                    const accountEmail = String(user.email || '').trim().toLowerCase();
-                    if (!ownerEmail || accountEmail !== ownerEmail) {
-                        return json(response, 403, { ok: false, error: 'not_allowed', message: 'Ese código solo lo puede usar la cuenta del dueño.' }), true;
-                    }
+                if (reward.grant === 'owner' && !isOwnerEmail(user)) {
+                    return json(response, 403, { ok: false, error: 'not_allowed', message: 'Ese código solo lo puede usar la cuenta del dueño.' }), true;
                 }
                 // Turso guarda los grants como JSON en una columna TEXT.
                 const current = await pool.query('SELECT * FROM hatitix_accounts WHERE id=$1', [user.id]);
@@ -1167,6 +1171,22 @@ function createAccountApi(pool) {
                 const { rows } = await pool.query('SELECT * FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2', [accountTagKey(match[1]), match[2]]);
                 if (!rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
                 json(response, 200, { ok: true, user: safeUser(rows[0]) }); return true;
+            }
+            if (request.method === 'POST' && url.pathname === '/api/admin/points') {
+                if (!isOwnerEmail(user)) return json(response, 403, { ok: false, error: 'not_allowed', message: 'Solo el dueño puede usar esto.' }), true;
+                const body = await readJson(request);
+                const tag = String(body.tag || '').trim();
+                const match = tag.match(/^(.{2,24})#(\d{4})$/u);
+                if (!match) return json(response, 400, { ok: false, error: 'invalid_tag', message: 'Usa el formato Nombre#1234.' }), true;
+                const delta = Math.trunc(Number(body.delta));
+                if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 1000000) {
+                    return json(response, 400, { ok: false, error: 'invalid_delta', message: 'La cantidad debe ser un número entero distinto de 0 (máx. 1.000.000).' }), true;
+                }
+                const found = await pool.query('SELECT * FROM hatitix_accounts WHERE name_key=$1 AND tag_code=$2', [accountTagKey(match[1]), match[2]]);
+                if (!found.rows[0]) return json(response, 404, { ok: false, error: 'not_found', message: 'No encontramos esa cuenta.' }), true;
+                const updated = await pool.query('UPDATE hatitix_accounts SET admin_points_total = admin_points_total + $2 WHERE id=$1 RETURNING *', [found.rows[0].id, delta]);
+                const target = safeUser(updated.rows[0]);
+                json(response, 200, { ok: true, user: target, delta, newTotal: target.adminPointsTotal }); return true;
             }
             if (request.method === 'GET' && url.pathname === '/api/friends') {
                 const { rows } = await pool.query(`
